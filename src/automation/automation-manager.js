@@ -1,9 +1,33 @@
+/**
+ * Automation Manager - Anti-Ban Stack 2025
+ *
+ * ZMIANY W TEJ WERSJI:
+ * - Pełny fingerprint spoofing (Canvas, WebGL, Audio, WebRTC, Chrome.runtime)
+ * - Bezier curves dla ruchu myszki
+ * - Delaye 4-18 minut między grupami (nie 60-90 sekund!)
+ * - Limity aktywności i tryb warming
+ * - Auto-pauza przy zbyt wielu banach
+ */
+
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const CryptoJS = require('crypto-js');
 const EventEmitter = require('events');
-const { randomDelay, randomTyping, getRandomUserAgent } = require('../utils/human-behavior');
+const {
+  randomDelay,
+  randomTyping,
+  getRandomUserAgent,
+  HumanMouse,
+  HumanTyping,
+  HumanScroll,
+  boundedGaussian,
+  engageWithGroup,
+  postPublishEngagement,
+  performHumanError,
+} = require('../utils/human-behavior');
 const ProxyManager = require('../utils/proxy-manager');
+const { FingerprintManager } = require('../utils/fingerprint-manager');
+const { ActivityLimiter, LIMITS } = require('../utils/activity-limiter');
 
 puppeteer.use(StealthPlugin());
 
@@ -19,6 +43,12 @@ class AutomationManager extends EventEmitter {
     this.logs = [];
     this.proxyManager = new ProxyManager();
     this.encryptionKey = 'fb-automation-secret-key-2024';
+
+    // Anti-Ban Stack 2025
+    this.fingerprintManager = new FingerprintManager();
+    this.activityLimiter = new ActivityLimiter(store);
+    this.postsSinceHumanError = 0;
+    this.currentFingerprint = null;
   }
 
   findChromePath() {
@@ -95,9 +125,13 @@ class AutomationManager extends EventEmitter {
 
   async initBrowser() {
     const proxyConfig = this.store.get('proxy', { enabled: false });
-    
+
     const executablePath = this.findChromePath();
-    
+
+    // Wygeneruj unikalny fingerprint dla tej sesji
+    this.currentFingerprint = this.fingerprintManager.generateFingerprint();
+    this.addLog(`🔐 Wygenerowano fingerprint: ${this.currentFingerprint.screen.width}x${this.currentFingerprint.screen.height}, GPU: ${this.currentFingerprint.webgl.renderer.substring(0, 30)}...`, 'info');
+
     const launchOptions = {
       headless: false,
       executablePath: executablePath,
@@ -107,13 +141,18 @@ class AutomationManager extends EventEmitter {
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
         '--disable-blink-features=AutomationControlled',
-        '--window-size=1366,768',
+        `--window-size=${this.currentFingerprint.screen.width},${this.currentFingerprint.screen.height}`,
         '--start-maximized',
         '--disable-infobars',
         '--disable-dev-shm-usage',
         '--no-first-run',
         '--no-zygote',
-        `--user-agent=${getRandomUserAgent()}`
+        `--user-agent=${this.currentFingerprint.userAgent}`,
+        // WebRTC leak prevention
+        '--disable-webrtc-encryption',
+        '--disable-webrtc-hw-encoding',
+        '--disable-webrtc-hw-decoding',
+        '--enforce-webrtc-ip-permission-check'
       ]
     };
 
@@ -124,7 +163,10 @@ class AutomationManager extends EventEmitter {
 
     this.browser = await puppeteer.launch(launchOptions);
     this.page = await this.browser.newPage();
-    
+
+    // Wstrzyknij skrypty stealth PRZED jakąkolwiek nawigacją
+    await this.injectStealthScripts();
+
     if (proxyConfig.enabled && proxyConfig.username && proxyConfig.password) {
       await this.page.authenticate({
         username: proxyConfig.username,
@@ -132,23 +174,28 @@ class AutomationManager extends EventEmitter {
       });
       this.addLog('Autoryzacja proxy skonfigurowana', 'info');
     }
-    
-    await this.page.setViewport({ width: 1366, height: 768 });
-    await this.page.setUserAgent(getRandomUserAgent());
-    
+
+    await this.page.setViewport({
+      width: this.currentFingerprint.screen.width,
+      height: this.currentFingerprint.screen.height
+    });
+
     // Załaduj zapisane cookies jeśli istnieją
     await this.loadCookies();
-    
-    // WYŁĄCZONE: Nie blokuj obrazków i CSS - chcemy pełny widok
-    // await this.page.setRequestInterception(true);
-    // this.page.on('request', (request) => {
-    //   const resourceType = request.resourceType();
-    //   if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-    //     request.abort();
-    //   } else {
-    //     request.continue();
-    //   }
-    // });
+
+    this.addLog('✅ Przeglądarka zainicjalizowana z fingerprint spoofing', 'success');
+  }
+
+  // Wstrzykuje skrypty stealth do strony
+  async injectStealthScripts() {
+    const stealthScripts = this.fingerprintManager.getStealthScripts(this.currentFingerprint);
+
+    // Wstrzyknij wszystkie skrypty przed nawigacją
+    for (const script of stealthScripts) {
+      await this.page.evaluateOnNewDocument(script);
+    }
+
+    this.addLog('🛡️ Wstrzyknięto skrypty stealth (Canvas, WebGL, Audio, WebRTC, Chrome.runtime)', 'info');
   }
 
   async saveCookies() {
@@ -300,16 +347,50 @@ class AutomationManager extends EventEmitter {
         await this.login(credentials);
       }
       
+      // Pobierz accountId z cookies lub użyj domyślnego
+      const accountId = config.accountId || 'default';
+
       // Główna pętla postowania
-      for (const group of config.groups) {
+      for (let i = 0; i < config.groups.length; i++) {
+        const group = config.groups[i];
         if (!this.isRunning) break;
-        
+
         while (this.isPaused) {
           await randomDelay(1000, 2000);
         }
-        
+
+        // ANTY-BAN: Sprawdź czy powinniśmy zatrzymać automatyzację
+        const pauseCheck = this.activityLimiter.shouldPauseAutomation();
+        if (pauseCheck.shouldPause) {
+          this.addLog(`🛑 AUTO-PAUZA: ${pauseCheck.reason}`, 'error');
+          this.emit('auto-pause', pauseCheck);
+          this.isRunning = false;
+          break;
+        }
+
+        // ANTY-BAN: Sprawdź limity aktywności
+        const canPostResult = this.activityLimiter.canPost(accountId);
+        if (!canPostResult.allowed) {
+          this.addLog(`⏸️ Limit osiągnięty: ${canPostResult.reason}`, 'warning');
+          break;
+        }
+
+        // Wyświetl statystyki przed postem
+        const stats = this.activityLimiter.getStats(accountId);
+        this.addLog(`📊 Posty dziś: ${stats.today.posts}/${stats.today.maxPosts}, Akcje: ${stats.today.totalActions}/${stats.today.maxActions}`, 'info');
+
         await this.postToGroup(group, config.message);
-        await randomDelay(config.delayBetweenPosts * 1000, (config.delayBetweenPosts + 30) * 1000);
+
+        // Zapisz akcję postu
+        this.activityLimiter.recordAction(accountId, 'post');
+
+        // ANTY-BAN: Delay 4-18 minut między grupami (zamiast 60-90 sekund!)
+        if (i < config.groups.length - 1) {
+          const delayMs = this.activityLimiter.getDelayBetweenGroups();
+          const delayMinutes = Math.round(delayMs / 60000 * 10) / 10;
+          this.addLog(`⏳ Czekam ${delayMinutes} minut przed następną grupą...`, 'info');
+          await randomDelay(delayMs * 0.9, delayMs * 1.1); // +/- 10% variacja
+        }
       }
 
       this.addLog('Automatyzacja zakończona pomyślnie!', 'success');
@@ -389,21 +470,51 @@ class AutomationManager extends EventEmitter {
         await this.login(credentials);
       }
       
+      // Pobierz accountId z cookies lub użyj domyślnego
+      const accountId = config.accountId || 'default';
+
       // Główna pętla postowania z CSV
       for (let i = 0; i < config.posts.length; i++) {
         if (!this.isRunning) break;
-        
+
         while (this.isPaused) {
           await randomDelay(1000, 2000);
         }
-        
+
+        // ANTY-BAN: Sprawdź czy powinniśmy zatrzymać automatyzację
+        const pauseCheck = this.activityLimiter.shouldPauseAutomation();
+        if (pauseCheck.shouldPause) {
+          this.addLog(`🛑 AUTO-PAUZA: ${pauseCheck.reason}`, 'error');
+          this.emit('auto-pause', pauseCheck);
+          this.isRunning = false;
+          break;
+        }
+
+        // ANTY-BAN: Sprawdź limity aktywności
+        const canPostResult = this.activityLimiter.canPost(accountId);
+        if (!canPostResult.allowed) {
+          this.addLog(`⏸️ Limit osiągnięty: ${canPostResult.reason}`, 'warning');
+          break;
+        }
+
+        // Wyświetl statystyki przed postem
+        const stats = this.activityLimiter.getStats(accountId);
+        this.addLog(`📊 Posty dziś: ${stats.today.posts}/${stats.today.maxPosts}, Akcje: ${stats.today.totalActions}/${stats.today.maxActions}`, 'info');
+
         const post = config.posts[i];
         this.addLog(`\n[${i + 1}/${config.posts.length}] Postuję do: ${post.groupLink}`, 'info');
-        
+
         await this.postToGroup(post.groupLink, post.postCopy);
-        
+
+        // Zapisz akcję postu
+        this.activityLimiter.recordAction(accountId, 'post');
+
+        // ANTY-BAN: Delay 4-18 minut między grupami (zamiast 60-90 sekund!)
         if (i < config.posts.length - 1) {
-          await randomDelay(config.delayBetweenPosts * 1000, (config.delayBetweenPosts + 30) * 1000);
+          const delayMs = this.activityLimiter.getDelayBetweenGroups();
+          const delayMinutes = Math.round(delayMs / 60000 * 10) / 10;
+          this.addLog(`⏳ Czekam ${delayMinutes} minut przed następną grupą...`, 'info');
+          await randomDelay(delayMs * 0.9, delayMs * 1.1);
         }
       }
 
@@ -918,21 +1029,51 @@ class AutomationManager extends EventEmitter {
         await this.login(credentials);
       }
       
+      // Pobierz accountId z cookies lub użyj domyślnego
+      const accountId = config.accountId || 'default';
+
       // Główna pętla postowania z CSV
       for (let i = 0; i < config.posts.length; i++) {
         if (!this.isRunning) break;
-        
+
         while (this.isPaused) {
           await randomDelay(1000, 2000);
         }
-        
+
+        // ANTY-BAN: Sprawdź czy powinniśmy zatrzymać automatyzację
+        const pauseCheck = this.activityLimiter.shouldPauseAutomation();
+        if (pauseCheck.shouldPause) {
+          this.addLog(`🛑 AUTO-PAUZA: ${pauseCheck.reason}`, 'error');
+          this.emit('auto-pause', pauseCheck);
+          this.isRunning = false;
+          break;
+        }
+
+        // ANTY-BAN: Sprawdź limity aktywności
+        const canPostResult = this.activityLimiter.canPost(accountId);
+        if (!canPostResult.allowed) {
+          this.addLog(`⏸️ Limit osiągnięty: ${canPostResult.reason}`, 'warning');
+          break;
+        }
+
+        // Wyświetl statystyki przed postem
+        const stats = this.activityLimiter.getStats(accountId);
+        this.addLog(`📊 Posty dziś: ${stats.today.posts}/${stats.today.maxPosts}, Akcje: ${stats.today.totalActions}/${stats.today.maxActions}`, 'info');
+
         const post = config.posts[i];
         this.addLog(`\n[${i + 1}/${config.posts.length}] Postuję do: ${post.groupLink}`, 'info');
-        
+
         await this.postToGroup(post.groupLink, post.postCopy);
-        
+
+        // Zapisz akcję postu
+        this.activityLimiter.recordAction(accountId, 'post');
+
+        // ANTY-BAN: Delay 4-18 minut między grupami (zamiast 60-90 sekund!)
         if (i < config.posts.length - 1) {
-          await randomDelay(config.delayBetweenPosts * 1000, (config.delayBetweenPosts + 30) * 1000);
+          const delayMs = this.activityLimiter.getDelayBetweenGroups();
+          const delayMinutes = Math.round(delayMs / 60000 * 10) / 10;
+          this.addLog(`⏳ Czekam ${delayMinutes} minut przed następną grupą...`, 'info');
+          await randomDelay(delayMs * 0.9, delayMs * 1.1);
         }
       }
 
@@ -1253,19 +1394,23 @@ class AutomationManager extends EventEmitter {
   async postToGroup(groupUrl, message) {
     try {
       this.addLog(`Postuję do grupy: ${groupUrl}`, 'info');
-      
+
       await this.page.goto(groupUrl, { waitUntil: 'networkidle2' });
-      await randomDelay(5000, 7000);
+      await randomDelay(3000, 5000);
 
       await this.checkForVerification();
-      
+
       const currentUrl = this.page.url();
       if (!currentUrl.includes('facebook.com/groups')) {
         throw new Error('Nie udało się przejść do grupy');
       }
 
-      // Scrolluj na górę
-      await this.page.evaluate(() => window.scrollTo(0, 0));
+      // ANTY-BAN: Engagement przed postem (15-60 sekund scroll + ewentualne lajki)
+      this.addLog('🔄 Wykonuję engagement przed postem (15-60s scroll)...', 'info');
+      await engageWithGroup(this.page);
+
+      // Scrolluj na górę przed postem
+      await this.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
       await randomDelay(2000, 3000);
 
       this.addLog('Szukam przycisku do tworzenia posta...', 'info');
@@ -1650,23 +1795,40 @@ class AutomationManager extends EventEmitter {
       if (errorDetected.detected) {
         const errorMsg = `⚠️ Facebook zablokował publikację: "${errorDetected.message}"`;
         this.addLog(errorMsg, 'error');
+
+        // ANTY-BAN: Zapisz event bana do śledzenia (dla auto-pauzy)
+        const accountId = this.currentTask?.accountId || 'default';
+        this.activityLimiter.markAsBanned(accountId, 'posting_limit');
+        this.addLog(`🚨 Konto ${accountId} oznaczone jako zbanowane`, 'error');
+
         this.emit('facebook-block-detected', {
           groupUrl,
           message: errorDetected.message,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          accountId
         });
-        
+
         // Zatrzymaj automatyzację
         this.isRunning = false;
         this.isPaused = false;
-        
+
         throw new Error(`Facebook zablokował publikację: ${errorDetected.message}`);
       }
       
-      // Jeśli nie ma błędu, czekaj jeszcze chwilę
-      await randomDelay(5000, 6000);
-      
+      // ANTY-BAN: Post-publish engagement (45-240 sekund)
+      // Zostań na stronie i scrolluj - wygląda bardziej naturalnie
+      this.addLog('🔄 Wykonuję post-publish engagement (45-240s)...', 'info');
+      await postPublishEngagement(this.page);
+
       this.addLog(`✅ Post opublikowany: ${groupUrl}`, 'success');
+
+      // ANTY-BAN: Losowo wykonaj "ludzki błąd" (raz na 10-15 postów)
+      this.postsSinceHumanError++;
+      if (this.activityLimiter.shouldMakeHumanError(this.postsSinceHumanError)) {
+        this.addLog('🤷 Wykonuję losowy "ludzki błąd"...', 'info');
+        await performHumanError(this.page);
+        this.postsSinceHumanError = 0;
+      }
 
     } catch (error) {
       this.addLog(`❌ Błąd: ${error.message}`, 'error');
