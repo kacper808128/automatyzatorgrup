@@ -345,7 +345,8 @@ class HumanScroll {
     const box = await element.boundingBox();
     if (!box) return;
 
-    const viewportSize = await this.page.viewportSize();
+    // Playwright: viewportSize() jest synchroniczne
+    const viewportSize = this.page.viewportSize();
     const elementCenter = box.y + box.height / 2;
     const viewportCenter = viewportSize.height / 2;
     const scrollNeeded = elementCenter - viewportCenter;

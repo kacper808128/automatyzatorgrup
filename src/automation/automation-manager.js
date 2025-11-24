@@ -2,6 +2,7 @@
  * Automation Manager - Anti-Ban Stack 2025
  *
  * ZMIANY W TEJ WERSJI:
+ * - PLAYWRIGHT zamiast Puppeteer (pełna migracja!)
  * - Pełny fingerprint spoofing (Canvas, WebGL, Audio, WebRTC, Chrome.runtime)
  * - Bezier curves dla ruchu myszki
  * - Delaye 4-18 minut między grupami (nie 60-90 sekund!)
@@ -9,8 +10,7 @@
  * - Auto-pauza przy zbyt wielu banach
  */
 
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { chromium } = require('playwright');
 const CryptoJS = require('crypto-js');
 const EventEmitter = require('events');
 const {
@@ -29,13 +29,12 @@ const ProxyManager = require('../utils/proxy-manager');
 const { FingerprintManager } = require('../utils/fingerprint-manager');
 const { ActivityLimiter, LIMITS } = require('../utils/activity-limiter');
 
-puppeteer.use(StealthPlugin());
-
 class AutomationManager extends EventEmitter {
   constructor(store) {
     super();
     this.store = store;
     this.browser = null;
+    this.context = null; // Playwright context
     this.page = null;
     this.isRunning = false;
     this.isPaused = false;
@@ -132,22 +131,20 @@ class AutomationManager extends EventEmitter {
     this.currentFingerprint = this.fingerprintManager.generateFingerprint();
     this.addLog(`🔐 Wygenerowano fingerprint: ${this.currentFingerprint.screen.width}x${this.currentFingerprint.screen.height}, GPU: ${this.currentFingerprint.webgl.renderer.substring(0, 30)}...`, 'info');
 
+    // Playwright launch options
     const launchOptions = {
       headless: false,
-      executablePath: executablePath,
+      executablePath: executablePath || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
         '--disable-blink-features=AutomationControlled',
-        `--window-size=${this.currentFingerprint.screen.width},${this.currentFingerprint.screen.height}`,
         '--start-maximized',
         '--disable-infobars',
         '--disable-dev-shm-usage',
         '--no-first-run',
-        '--no-zygote',
-        `--user-agent=${this.currentFingerprint.userAgent}`,
         // WebRTC leak prevention
         '--disable-webrtc-encryption',
         '--disable-webrtc-hw-encoding',
@@ -156,43 +153,52 @@ class AutomationManager extends EventEmitter {
       ]
     };
 
+    // Proxy configuration for Playwright
     if (proxyConfig.enabled && proxyConfig.host && proxyConfig.port) {
-      launchOptions.args.push(`--proxy-server=http://${proxyConfig.host}:${proxyConfig.port}`);
+      launchOptions.proxy = {
+        server: `http://${proxyConfig.host}:${proxyConfig.port}`,
+        username: proxyConfig.username || undefined,
+        password: proxyConfig.password || undefined
+      };
       this.addLog(`Używam proxy: ${proxyConfig.host}:${proxyConfig.port}`, 'info');
     }
 
-    this.browser = await puppeteer.launch(launchOptions);
-    this.page = await this.browser.newPage();
+    // Playwright browser launch
+    this.browser = await chromium.launch(launchOptions);
+
+    // Create context with fingerprint settings
+    this.context = await this.browser.newContext({
+      viewport: {
+        width: this.currentFingerprint.screen.width,
+        height: this.currentFingerprint.screen.height
+      },
+      userAgent: this.currentFingerprint.userAgent,
+      locale: this.currentFingerprint.locale,
+      timezoneId: this.currentFingerprint.timezone,
+      deviceScaleFactor: 1,
+      hasTouch: false,
+      javaScriptEnabled: true,
+      ignoreHTTPSErrors: true
+    });
+
+    this.page = await this.context.newPage();
 
     // Wstrzyknij skrypty stealth PRZED jakąkolwiek nawigacją
     await this.injectStealthScripts();
 
-    if (proxyConfig.enabled && proxyConfig.username && proxyConfig.password) {
-      await this.page.authenticate({
-        username: proxyConfig.username,
-        password: proxyConfig.password
-      });
-      this.addLog('Autoryzacja proxy skonfigurowana', 'info');
-    }
-
-    await this.page.setViewport({
-      width: this.currentFingerprint.screen.width,
-      height: this.currentFingerprint.screen.height
-    });
-
     // Załaduj zapisane cookies jeśli istnieją
     await this.loadCookies();
 
-    this.addLog('✅ Przeglądarka zainicjalizowana z fingerprint spoofing', 'success');
+    this.addLog('✅ Przeglądarka Playwright zainicjalizowana z fingerprint spoofing', 'success');
   }
 
-  // Wstrzykuje skrypty stealth do strony
+  // Wstrzykuje skrypty stealth do strony (Playwright)
   async injectStealthScripts() {
     const stealthScripts = this.fingerprintManager.getStealthScripts(this.currentFingerprint);
 
-    // Wstrzyknij wszystkie skrypty przed nawigacją
+    // Playwright: użyj addInitScript zamiast evaluateOnNewDocument
     for (const script of stealthScripts) {
-      await this.page.evaluateOnNewDocument(script);
+      await this.context.addInitScript(script);
     }
 
     this.addLog('🛡️ Wstrzyknięto skrypty stealth (Canvas, WebGL, Audio, WebRTC, Chrome.runtime)', 'info');
@@ -200,7 +206,8 @@ class AutomationManager extends EventEmitter {
 
   async saveCookies() {
     try {
-      const cookies = await this.page.cookies();
+      // Playwright: cookies są w context, nie w page
+      const cookies = await this.context.cookies();
       this.store.set('cookies', cookies);
       this.addLog('Sesja zapisana (cookies)', 'success');
     } catch (error) {
@@ -212,7 +219,8 @@ class AutomationManager extends EventEmitter {
     try {
       const cookies = this.store.get('cookies');
       if (cookies && cookies.length > 0) {
-        await this.page.setCookie(...cookies);
+        // Playwright: addCookies zamiast setCookie
+        await this.context.addCookies(cookies);
         this.addLog('Załadowano zapisaną sesję', 'success');
         return true;
       }
@@ -231,20 +239,23 @@ class AutomationManager extends EventEmitter {
   async testLogin(credentials) {
     try {
       this.addLog('Rozpoczynam test logowania...', 'info');
-      
+
       await this.initBrowser();
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
+      // Playwright: waitUntil 'networkidle' zamiast 'networkidle'
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
       await randomDelay(2000, 4000);
 
-      // Wpisywanie emaila
+      // Wpisywanie emaila - Playwright style
       const emailSelector = '#email';
       await this.page.waitForSelector(emailSelector, { timeout: 10000 });
-      await randomTyping(this.page, emailSelector, credentials.email);
+      await this.page.fill(emailSelector, '');
+      await this.page.type(emailSelector, credentials.email, { delay: 100 });
       await randomDelay(1000, 2000);
 
       // Wpisywanie hasła
       const passwordSelector = '#pass';
-      await randomTyping(this.page, passwordSelector, credentials.password);
+      await this.page.fill(passwordSelector, '');
+      await this.page.type(passwordSelector, credentials.password, { delay: 100 });
       await randomDelay(1000, 2000);
 
       // Kliknięcie przycisku logowania
@@ -252,11 +263,11 @@ class AutomationManager extends EventEmitter {
       await this.page.click(loginButton);
       await randomDelay(3000, 5000);
 
-      // Sprawdzenie czy zalogowano
-      await this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-      
+      // Playwright: waitForLoadState zamiast waitForNavigation
+      await this.page.waitForLoadState('networkidle', { timeout: 15000 });
+
       const currentUrl = this.page.url();
-      
+
       // Sprawdzenie CAPTCHA
       if (currentUrl.includes('checkpoint') || currentUrl.includes('captcha')) {
         this.emit('captcha-detected');
@@ -304,8 +315,8 @@ class AutomationManager extends EventEmitter {
         try {
           const cookies = JSON.parse(config.cookies);
           this.addLog(`Ładuję ${cookies.length} cookies...`, 'info');
-          
-          // Normalizuj cookies
+
+          // Normalizuj cookies dla Playwright
           const normalizedCookies = cookies.map(cookie => ({
             name: cookie.name,
             value: cookie.value,
@@ -313,26 +324,27 @@ class AutomationManager extends EventEmitter {
             path: cookie.path || '/',
             secure: cookie.secure !== undefined ? cookie.secure : false,
             httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : false,
-            sameSite: cookie.sameSite === 'no_restriction' ? 'None' : 
-                     cookie.sameSite === 'lax' ? 'Lax' : 
+            sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
+                     cookie.sameSite === 'lax' ? 'Lax' :
                      cookie.sameSite === 'strict' ? 'Strict' : 'None',
             expires: cookie.expirationDate ? cookie.expirationDate : undefined
           }));
-          
-          await this.page.setCookie(...normalizedCookies);
+
+          // Playwright: addCookies zamiast setCookie
+          await this.context.addCookies(normalizedCookies);
           this.addLog('✅ Cookies załadowane', 'success');
-          
+
           // Przejdź na Facebook żeby cookies zadziałały
-          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
+          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
           await randomDelay(3000, 5000);
-          
+
           const currentUrl = this.page.url();
           if (currentUrl.includes('facebook.com') && !currentUrl.includes('login')) {
             this.addLog('✅ Zalogowano przez cookies!', 'success');
           } else {
             throw new Error('Cookies nie zadziałały - zaloguj się ręcznie w przeglądarce');
           }
-          
+
         } catch (cookieError) {
           this.addLog(`⚠️ Błąd cookies: ${cookieError.message}`, 'warning');
           this.addLog('Spróbuj zalogować się ręcznie w przeglądarce...', 'info');
@@ -445,10 +457,10 @@ class AutomationManager extends EventEmitter {
             expires: cookie.expirationDate ? cookie.expirationDate : undefined
           }));
           
-          await this.page.setCookie(...normalizedCookies);
+          await this.context.addCookies(normalizedCookies);
           this.addLog('✅ Cookies załadowane', 'success');
           
-          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
+          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
           await randomDelay(3000, 5000);
           
           const currentUrl = this.page.url();
@@ -581,36 +593,48 @@ class AutomationManager extends EventEmitter {
 
   async runAccountTaskIsolated(task, delayBetweenPosts) {
     const { accountIndex, cookies, posts } = task;
-    const puppeteer = require('puppeteer');
-    
-    this.addLog(`\n[Konto #${accountIndex}] Inicjalizuję przeglądarkę...`, 'info');
-    
+    const { chromium } = require('playwright');
+
+    this.addLog(`\n[Konto #${accountIndex}] Inicjalizuję przeglądarkę Playwright...`, 'info');
+
     // Znajdź Chrome
     const executablePath = this.findChromePath();
-    
-    // Uruchom osobną instancję przeglądarki dla tego konta
-    const browser = await puppeteer.launch({
+
+    // Wygeneruj fingerprint dla tego konta
+    const fingerprint = this.fingerprintManager.generateFingerprint(accountIndex);
+
+    // Uruchom osobną instancję przeglądarki dla tego konta (Playwright)
+    const browser = await chromium.launch({
       headless: false,
-      executablePath: executablePath,
+      executablePath: executablePath || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process',
         '--disable-blink-features=AutomationControlled',
-        '--window-size=1366,768',
         '--start-maximized',
-        `--window-position=${(accountIndex - 1) * 50},${(accountIndex - 1) * 50}`, // Przesuń okna
         '--disable-infobars',
         '--disable-dev-shm-usage',
-        '--no-first-run',
-        '--no-zygote',
-        `--user-agent=${this.getRandomUserAgent()}`
+        '--no-first-run'
       ]
     });
-    
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1366, height: 768 });
+
+    // Playwright: context z fingerprint settings
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 768 },
+      userAgent: fingerprint.userAgent,
+      locale: fingerprint.locale,
+      timezoneId: fingerprint.timezone
+    });
+
+    // Wstrzyknij skrypty stealth
+    const stealthScripts = this.fingerprintManager.getStealthScripts(fingerprint);
+    for (const script of stealthScripts) {
+      await context.addInitScript(script);
+    }
+
+    const page = await context.newPage();
     
     try {
       // Załaduj cookies
@@ -622,17 +646,18 @@ class AutomationManager extends EventEmitter {
         path: cookie.path || '/',
         secure: cookie.secure !== undefined ? cookie.secure : false,
         httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : false,
-        sameSite: cookie.sameSite === 'no_restriction' ? 'None' : 
-                 cookie.sameSite === 'lax' ? 'Lax' : 
+        sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
+                 cookie.sameSite === 'lax' ? 'Lax' :
                  cookie.sameSite === 'strict' ? 'Strict' : 'None',
         expires: cookie.expirationDate ? cookie.expirationDate : undefined
       }));
-      
-      await page.setCookie(...normalizedCookies);
+
+      // Playwright: addCookies na context
+      await context.addCookies(normalizedCookies);
       this.addLog(`[Konto #${accountIndex}] ✅ Cookies załadowane`, 'success');
-      
+
       // Przejdź na Facebook
-      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
+      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
       await randomDelay(3000, 5000);
       
       const currentUrl = page.url();
@@ -671,7 +696,7 @@ class AutomationManager extends EventEmitter {
     try {
       this.addLog(`[Konto #${accountIndex}] Postuję do grupy: ${groupUrl}`, 'info');
       
-      await page.goto(groupUrl, { waitUntil: 'networkidle2' });
+      await page.goto(groupUrl, { waitUntil: 'networkidle' });
       await randomDelay(5000, 7000);
       
       const currentUrl = page.url();
@@ -969,131 +994,6 @@ class AutomationManager extends EventEmitter {
     return userAgents[Math.floor(Math.random() * userAgents.length)];
   }
 
-  async startPostingFromCSV(config) {
-    if (this.isRunning) {
-      throw new Error('Automatyzacja jest już uruchomiona');
-    }
-
-    try {
-      this.isRunning = true;
-      this.isPaused = false;
-      this.currentTask = config;
-      this.emit('status-change', this.getStatus());
-      
-      this.addLog(`Rozpoczynam automatyzację z CSV (${config.posts.length} postów)...`, 'info');
-      
-      // Inicjalizuj przeglądarkę
-      await this.initBrowser();
-      
-      // Załaduj cookies jeśli są podane
-      if (config.cookies) {
-        try {
-          const cookies = JSON.parse(config.cookies);
-          this.addLog(`Ładuję ${cookies.length} cookies...`, 'info');
-          
-          const normalizedCookies = cookies.map(cookie => ({
-            name: cookie.name,
-            value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path || '/',
-            secure: cookie.secure !== undefined ? cookie.secure : false,
-            httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : false,
-            sameSite: cookie.sameSite === 'no_restriction' ? 'None' : 
-                     cookie.sameSite === 'lax' ? 'Lax' : 
-                     cookie.sameSite === 'strict' ? 'Strict' : 'None',
-            expires: cookie.expirationDate ? cookie.expirationDate : undefined
-          }));
-          
-          await this.page.setCookie(...normalizedCookies);
-          this.addLog('✅ Cookies załadowane', 'success');
-          
-          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
-          await randomDelay(3000, 5000);
-          
-          const currentUrl = this.page.url();
-          if (currentUrl.includes('facebook.com') && !currentUrl.includes('login')) {
-            this.addLog('✅ Zalogowano przez cookies!', 'success');
-          } else {
-            throw new Error('Cookies nie zadziałały');
-          }
-          
-        } catch (cookieError) {
-          this.addLog(`⚠️ Błąd cookies: ${cookieError.message}`, 'warning');
-          throw new Error(`Błąd cookies: ${cookieError.message}`);
-        }
-      } else {
-        const credentials = await this.getCredentials();
-        if (!credentials) {
-          throw new Error('Brak zapisanych danych logowania ani cookies');
-        }
-        await this.login(credentials);
-      }
-      
-      // Pobierz accountId z cookies lub użyj domyślnego
-      const accountId = config.accountId || 'default';
-
-      // Główna pętla postowania z CSV
-      for (let i = 0; i < config.posts.length; i++) {
-        if (!this.isRunning) break;
-
-        while (this.isPaused) {
-          await randomDelay(1000, 2000);
-        }
-
-        // ANTY-BAN: Sprawdź czy powinniśmy zatrzymać automatyzację
-        const pauseCheck = this.activityLimiter.shouldPauseAutomation();
-        if (pauseCheck.shouldPause) {
-          this.addLog(`🛑 AUTO-PAUZA: ${pauseCheck.reason}`, 'error');
-          this.emit('auto-pause', pauseCheck);
-          this.isRunning = false;
-          break;
-        }
-
-        // ANTY-BAN: Sprawdź limity aktywności
-        const canPostResult = this.activityLimiter.canPost(accountId);
-        if (!canPostResult.allowed) {
-          this.addLog(`⏸️ Limit osiągnięty: ${canPostResult.reason}`, 'warning');
-          break;
-        }
-
-        // Wyświetl statystyki przed postem
-        const stats = this.activityLimiter.getStats(accountId);
-        this.addLog(`📊 Posty dziś: ${stats.today.posts}/${stats.today.maxPosts}, Akcje: ${stats.today.totalActions}/${stats.today.maxActions}`, 'info');
-
-        const post = config.posts[i];
-        this.addLog(`\n[${i + 1}/${config.posts.length}] Postuję do: ${post.groupLink}`, 'info');
-
-        await this.postToGroup(post.groupLink, post.postCopy);
-
-        // Zapisz akcję postu
-        this.activityLimiter.recordAction(accountId, 'post');
-
-        // ANTY-BAN: Delay 4-18 minut między grupami (zamiast 60-90 sekund!)
-        if (i < config.posts.length - 1) {
-          const delayMs = this.activityLimiter.getDelayBetweenGroups();
-          const delayMinutes = Math.round(delayMs / 60000 * 10) / 10;
-          this.addLog(`⏳ Czekam ${delayMinutes} minut przed następną grupą...`, 'info');
-          await randomDelay(delayMs * 0.9, delayMs * 1.1);
-        }
-      }
-
-      this.addLog(`\n✅ Zakończono postowanie z CSV! (${config.posts.length} postów)`, 'success');
-      await this.closeBrowser();
-      this.isRunning = false;
-      this.emit('status-change', this.getStatus());
-      
-      return { success: true };
-
-    } catch (error) {
-      this.addLog(`❌ Błąd podczas postowania z CSV: ${error.message}`, 'error');
-      this.emit('error', error);
-      await this.closeBrowser();
-      this.isRunning = false;
-      this.emit('status-change', this.getStatus());
-      throw error;
-    }
-  }
-
   async login(credentials) {
     this.addLog('Loguję się do Facebooka...', 'info');
     
@@ -1101,7 +1001,7 @@ class AutomationManager extends EventEmitter {
     
     if (hasCookies) {
       this.addLog('Sprawdzam zapisaną sesję...', 'info');
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
       await randomDelay(3000, 5000);
       
       // Sprawdź URL - jeśli nie przekierowuje na login, prawdopodobnie jesteśmy zalogowani
@@ -1130,7 +1030,7 @@ class AutomationManager extends EventEmitter {
     
     // Jeśli już jesteśmy na Facebooku, sprawdź czy są pola logowania
     if (!currentUrl.includes('facebook.com')) {
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle2' });
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
       await randomDelay(2000, 4000);
     }
     
@@ -1151,7 +1051,7 @@ class AutomationManager extends EventEmitter {
     await randomDelay(800, 1500);
     
     await this.page.click('button[name="login"]');
-    await this.page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    await this.page.waitForLoadState('networkidle', { timeout: 15000 });
     
     await this.checkForVerification();
     
@@ -1395,7 +1295,7 @@ class AutomationManager extends EventEmitter {
     try {
       this.addLog(`Postuję do grupy: ${groupUrl}`, 'info');
 
-      await this.page.goto(groupUrl, { waitUntil: 'networkidle2' });
+      await this.page.goto(groupUrl, { waitUntil: 'networkidle' });
       await randomDelay(3000, 5000);
 
       await this.checkForVerification();
@@ -1864,6 +1764,10 @@ class AutomationManager extends EventEmitter {
   }
 
   async closeBrowser() {
+    if (this.context) {
+      await this.context.close();
+      this.context = null;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = null;

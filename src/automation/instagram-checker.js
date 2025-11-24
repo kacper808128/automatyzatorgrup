@@ -1,9 +1,12 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+/**
+ * Instagram Checker - Migrated to Playwright
+ * Anti-Ban Stack 2025
+ */
+
+const { chromium } = require('playwright');
 const axios = require('axios');
 const { getRandomUserAgent } = require('../utils/human-behavior');
-
-puppeteer.use(StealthPlugin());
+const { FingerprintManager } = require('../utils/fingerprint-manager');
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -11,9 +14,11 @@ class InstagramChecker {
   constructor(store) {
     this.store = store;
     this.browser = null;
+    this.context = null;
     this.page = null;
     this.isRunning = false;
     this.results = [];
+    this.fingerprintManager = new FingerprintManager();
   }
 
   addLog(message, type = 'info') {
@@ -32,22 +37,37 @@ class InstagramChecker {
 
       // Otwórz przeglądarkę jeśli nie jest otwarta
       if (!this.browser) {
-        this.browser = await puppeteer.launch({
+        const fingerprint = this.fingerprintManager.generateFingerprint();
+
+        this.browser = await chromium.launch({
           headless: false,
           args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            `--user-agent=${getRandomUserAgent()}`
+            '--disable-blink-features=AutomationControlled'
           ]
         });
 
-        this.page = await this.browser.newPage();
-        await this.page.setViewport({ width: 1366, height: 768 });
+        // Playwright: context z fingerprint settings
+        this.context = await this.browser.newContext({
+          viewport: { width: 1366, height: 768 },
+          userAgent: fingerprint.userAgent,
+          locale: fingerprint.locale,
+          timezoneId: fingerprint.timezone
+        });
+
+        // Wstrzyknij skrypty stealth
+        const stealthScripts = this.fingerprintManager.getStealthScripts(fingerprint);
+        for (const script of stealthScripts) {
+          await this.context.addInitScript(script);
+        }
+
+        this.page = await this.context.newPage();
 
         // Załaduj cookies jeśli podane
         if (cookies && cookies.length > 0) {
           this.addLog('Ładuję cookies...', 'info');
-          
+
           const normalizedCookies = cookies.map(cookie => ({
             name: cookie.name,
             value: cookie.value,
@@ -55,64 +75,65 @@ class InstagramChecker {
             path: cookie.path || '/',
             secure: cookie.secure || false,
             httpOnly: cookie.httpOnly || false,
-            sameSite: cookie.sameSite === 'no_restriction' ? 'None' : 
-                     cookie.sameSite === 'lax' ? 'Lax' : 
+            sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
+                     cookie.sameSite === 'lax' ? 'Lax' :
                      cookie.sameSite === 'strict' ? 'Strict' : 'None',
             expires: cookie.expirationDate ? cookie.expirationDate : undefined
           }));
 
-          await this.page.setCookie(...normalizedCookies);
+          // Playwright: addCookies na context
+          await this.context.addCookies(normalizedCookies);
           this.addLog(`Załadowano ${normalizedCookies.length} cookies`, 'success');
         }
       }
 
-      // Przejdź na reel
-      await this.page.goto(url, { waitUntil: 'networkidle2' });
+      // Przejdź na reel - Playwright: networkidle zamiast networkidle2
+      await this.page.goto(url, { waitUntil: 'networkidle' });
       await delay(3000);
 
       // Kliknij "View insights"
       this.addLog('Szukam przycisku View insights...', 'info');
-      
+
       const viewInsightsClicked = await this.page.evaluate(() => {
         // Metoda 1: Szukaj po tekście w różnych tagach
         const selectors = ['a', 'button', 'span', 'div[role="button"]', '[role="link"]'];
-        
+
         for (const selector of selectors) {
           const elements = Array.from(document.querySelectorAll(selector));
           const viewInsightsBtn = elements.find(el => {
             const text = (el.textContent || el.innerText || '').toLowerCase();
-            return text.includes('view insights') || 
+            return text.includes('view insights') ||
                    text.includes('zobacz statystyki') ||
                    text.includes('wyświetl statystyki') ||
                    text === 'insights';
           });
-          
+
           if (viewInsightsBtn) {
             viewInsightsBtn.click();
             return true;
           }
         }
-        
+
         // Metoda 2: Szukaj po aria-label
         const ariaElements = Array.from(document.querySelectorAll('[aria-label]'));
         const ariaBtn = ariaElements.find(el => {
           const label = el.getAttribute('aria-label').toLowerCase();
           return label.includes('view insights') || label.includes('insights');
         });
-        
+
         if (ariaBtn) {
           ariaBtn.click();
           return true;
         }
-        
+
         return false;
       });
 
       if (!viewInsightsClicked) {
         // Spróbuj screenshot dla debugowania
-        await this.page.screenshot({ 
+        await this.page.screenshot({
           path: '/tmp/instagram-no-insights-btn.png',
-          fullPage: false 
+          fullPage: false
         });
         throw new Error('Nie znaleziono przycisku "View insights" - czy to Twój reel? Czy jesteś zalogowany?');
       }
@@ -122,19 +143,19 @@ class InstagramChecker {
 
       // Kliknij zakładkę "Ad"
       this.addLog('Szukam zakładki Ad...', 'info');
-      
+
       const adTabClicked = await this.page.evaluate(() => {
         const elements = Array.from(document.querySelectorAll('button, div[role="button"], span, [role="tab"]'));
         const adTab = elements.find(el => {
           const text = (el.textContent || el.innerText || '').trim().toLowerCase();
           const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-          return text === 'ad' || 
-                 text === 'reklama' || 
+          return text === 'ad' ||
+                 text === 'reklama' ||
                  text === 'ads' ||
                  ariaLabel.includes('ad') ||
                  ariaLabel.includes('reklama');
         });
-        
+
         if (adTab) {
           adTab.click();
           return true;
@@ -151,11 +172,11 @@ class InstagramChecker {
 
       // Odczytaj wyświetlenia (Views)
       this.addLog('Odczytuję Views...', 'info');
-      
+
       const viewsData = await this.page.evaluate(() => {
         // Metoda 1: Szukaj "Views" i liczby obok
         const allText = document.body.innerText;
-        
+
         // Pattern 1: "Views\n1,234" lub "Views 1,234"
         const pattern1 = /Views[\s\n]+?([\d,]+)/i;
         const match1 = allText.match(pattern1);
@@ -163,7 +184,7 @@ class InstagramChecker {
           const number = match1[1].replace(/,/g, '');
           return { views: parseInt(number), method: 'pattern1' };
         }
-        
+
         // Pattern 2: "1,234 Views" lub "1234 wyświetleń"
         const pattern2 = /([\d,]+)[\s]+?(?:Views|wyświetleń|wyświetlenia)/i;
         const match2 = allText.match(pattern2);
@@ -171,14 +192,14 @@ class InstagramChecker {
           const number = match2[1].replace(/,/g, '');
           return { views: parseInt(number), method: 'pattern2' };
         }
-        
+
         // Metoda 2: Szukaj elementów z tekstem "Views"
         const elements = Array.from(document.querySelectorAll('span, div, p, li, td, dt, dd'));
-        
+
         for (let i = 0; i < elements.length; i++) {
           const el = elements[i];
           const text = (el.textContent || '').trim();
-          
+
           if (text.toLowerCase() === 'views' || text.toLowerCase() === 'wyświetlenia') {
             // Sprawdź parent, siblings, next elements
             const parent = el.parentElement;
@@ -194,7 +215,7 @@ class InstagramChecker {
                   return { views: parseInt(number), method: 'siblings' };
                 }
               }
-              
+
               // Check parent text
               const parentText = parent.textContent.trim();
               const parentMatch = parentText.match(/([\d,]+)/);
@@ -203,7 +224,7 @@ class InstagramChecker {
                 return { views: parseInt(number), method: 'parent' };
               }
             }
-            
+
             // Check next element
             let next = el.nextElementSibling;
             let attempts = 0;
@@ -219,7 +240,7 @@ class InstagramChecker {
             }
           }
         }
-        
+
         // Metoda 3: Szukaj dowolnej dużej liczby w statystykach
         const statsElements = Array.from(document.querySelectorAll('[class*="stat"], [class*="metric"], [class*="insight"]'));
         for (const el of statsElements) {
@@ -233,15 +254,15 @@ class InstagramChecker {
             }
           }
         }
-        
+
         return { views: null, method: 'none', html: document.body.innerHTML.substring(0, 500) };
       });
 
       if (viewsData.views === null) {
         // Screenshot dla debugowania
-        await this.page.screenshot({ 
+        await this.page.screenshot({
           path: '/tmp/instagram-no-views.png',
-          fullPage: true 
+          fullPage: true
         });
         this.addLog(`Debug: method=${viewsData.method}`, 'info');
         throw new Error('Nie znaleziono wartości Views - sprawdź /tmp/instagram-no-views.png');
@@ -252,10 +273,10 @@ class InstagramChecker {
 
       // Wyślij na webhook
       const result = { url, views };
-      
+
       if (webhookUrl) {
         this.addLog(`Wysyłam na webhook: ${webhookUrl}`, 'info');
-        
+
         try {
           await axios.post(webhookUrl, result, {
             headers: { 'Content-Type': 'application/json' },
@@ -277,7 +298,7 @@ class InstagramChecker {
 
     } catch (error) {
       this.addLog(`❌ Błąd: ${error.message}`, 'error');
-      
+
       this.results.push({
         url,
         views: null,
@@ -308,7 +329,7 @@ class InstagramChecker {
 
         try {
           await this.checkReel(url, webhookUrl, cookies);
-          
+
           // Opóźnienie między reelsami
           if (i < urls.length - 1) {
             this.addLog('Czekam 5 sekund przed kolejnym...', 'info');
@@ -332,6 +353,10 @@ class InstagramChecker {
 
   async stop() {
     this.isRunning = false;
+    if (this.context) {
+      await this.context.close();
+      this.context = null;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = null;

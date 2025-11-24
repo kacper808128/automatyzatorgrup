@@ -29,7 +29,8 @@
     "axios": "^1.6.0",
     "node-schedule": "^2.1.1",
     "electron-store": "^8.1.0",
-    "@google/generative-ai": "^0.21.0"
+    "@google/generative-ai": "^0.21.0",
+    "rebrowser-patches": "^1.0.0"
   },
   "devDependencies": {
     "electron": "^27.0.0",
