@@ -224,6 +224,65 @@ ipcMain.handle('get-proxy', async () => {
   return store.get('proxy', { enabled: false, host: '', port: '' });
 });
 
+// =============================================
+// COOKIE VALIDATION HANDLERS
+// =============================================
+
+ipcMain.handle('validate-cookies', async (event, cookies) => {
+  return automationManager.validateCookies(cookies);
+});
+
+ipcMain.handle('validate-cookies-online', async (event, cookies) => {
+  return await automationManager.validateCookiesOnline(cookies);
+});
+
+ipcMain.handle('filter-valid-accounts', async (event, { accounts, checkOnline }) => {
+  return await automationManager.filterValidAccounts(accounts, checkOnline);
+});
+
+// =============================================
+// PROXY LIST HANDLERS - wiele proxy
+// =============================================
+
+ipcMain.handle('add-proxy', async (event, proxy) => {
+  try {
+    const result = automationManager.addProxy(proxy);
+    return { success: true, proxy: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('remove-proxy', async (event, proxyId) => {
+  try {
+    automationManager.removeProxy(proxyId);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-proxy-list', async () => {
+  return automationManager.getProxyList();
+});
+
+ipcMain.handle('test-proxy', async (event, proxy) => {
+  return await automationManager.testProxy(proxy);
+});
+
+ipcMain.handle('assign-proxy-to-account', async (event, { accountId, proxyId }) => {
+  try {
+    automationManager.assignProxyToAccount(accountId, proxyId);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-proxy-for-account', async (event, accountId) => {
+  return automationManager.getProxyForAccount(accountId);
+});
+
 function sendNotification(title, body) {
   if (Notification.isSupported()) {
     new Notification({ title, body }).show();

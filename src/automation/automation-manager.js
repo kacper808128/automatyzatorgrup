@@ -48,6 +48,309 @@ class AutomationManager extends EventEmitter {
     this.activityLimiter = new ActivityLimiter(store);
     this.postsSinceHumanError = 0;
     this.currentFingerprint = null;
+
+    // Proxy management - obsługa wielu proxy
+    this.proxyList = store.get('proxyList', []);
+  }
+
+  // =============================================
+  // COOKIE VALIDATION - sprawdzanie ważności cookies
+  // =============================================
+
+  /**
+   * Sprawdza czy cookies są ważne (zawierają wymagane tokeny FB)
+   * @param {string|Array} cookies - JSON string lub array cookies
+   * @returns {Object} { valid: boolean, reason: string, expiresIn?: number }
+   */
+  validateCookies(cookies) {
+    try {
+      const cookieArray = typeof cookies === 'string' ? JSON.parse(cookies) : cookies;
+
+      if (!cookieArray || !Array.isArray(cookieArray) || cookieArray.length === 0) {
+        return { valid: false, reason: 'Brak cookies' };
+      }
+
+      // Kluczowe cookies Facebook
+      const requiredCookies = {
+        'c_user': null,  // User ID - najważniejszy
+        'xs': null,      // Session token - najważniejszy
+        'datr': null,    // Device token
+      };
+
+      const now = Date.now() / 1000; // Current time in seconds
+      let earliestExpiry = Infinity;
+
+      for (const cookie of cookieArray) {
+        if (requiredCookies.hasOwnProperty(cookie.name)) {
+          requiredCookies[cookie.name] = cookie;
+
+          // Sprawdź expiry
+          const expiry = cookie.expirationDate || cookie.expires;
+          if (expiry && expiry < earliestExpiry) {
+            earliestExpiry = expiry;
+          }
+        }
+      }
+
+      // Sprawdź czy mamy c_user i xs (minimalne wymagania)
+      if (!requiredCookies['c_user'] || !requiredCookies['c_user'].value) {
+        return { valid: false, reason: 'Brak cookie c_user (User ID)' };
+      }
+
+      if (!requiredCookies['xs'] || !requiredCookies['xs'].value) {
+        return { valid: false, reason: 'Brak cookie xs (Session token)' };
+      }
+
+      // Sprawdź czy cookies nie wygasły
+      if (earliestExpiry !== Infinity && earliestExpiry < now) {
+        return { valid: false, reason: 'Cookies wygasły' };
+      }
+
+      // Oblicz ile dni do wygaśnięcia
+      let expiresInDays = null;
+      if (earliestExpiry !== Infinity) {
+        expiresInDays = Math.floor((earliestExpiry - now) / 86400);
+      }
+
+      // Ostrzeżenie jeśli cookies wygasają w ciągu 7 dni
+      if (expiresInDays !== null && expiresInDays < 7) {
+        return {
+          valid: true,
+          reason: `Cookies ważne, ale wygasają za ${expiresInDays} dni!`,
+          expiresIn: expiresInDays,
+          warning: true
+        };
+      }
+
+      return {
+        valid: true,
+        reason: 'Cookies ważne',
+        expiresIn: expiresInDays,
+        userId: requiredCookies['c_user'].value
+      };
+
+    } catch (error) {
+      return { valid: false, reason: `Błąd parsowania cookies: ${error.message}` };
+    }
+  }
+
+  /**
+   * Weryfikuje cookies online (sprawdza czy sesja jest aktywna)
+   * @param {string|Array} cookies - cookies do sprawdzenia
+   * @returns {Promise<Object>} { valid: boolean, reason: string }
+   */
+  async validateCookiesOnline(cookies) {
+    const { chromium } = require('playwright');
+
+    // Najpierw walidacja offline
+    const offlineCheck = this.validateCookies(cookies);
+    if (!offlineCheck.valid) {
+      return offlineCheck;
+    }
+
+    let browser = null;
+    let context = null;
+
+    try {
+      browser = await chromium.launch({ headless: true });
+      context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      });
+
+      const cookieArray = typeof cookies === 'string' ? JSON.parse(cookies) : cookies;
+      const normalizedCookies = cookieArray.map(cookie => ({
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path || '/',
+        secure: cookie.secure || false,
+        httpOnly: cookie.httpOnly || false,
+        sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
+                 cookie.sameSite === 'lax' ? 'Lax' :
+                 cookie.sameSite === 'strict' ? 'Strict' : 'None',
+        expires: cookie.expirationDate ? cookie.expirationDate : undefined
+      }));
+
+      await context.addCookies(normalizedCookies);
+      const page = await context.newPage();
+
+      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 });
+      const currentUrl = page.url();
+
+      // Sprawdź czy nie przekierowało na login
+      const isLoggedIn = !currentUrl.includes('login') &&
+                        !currentUrl.includes('checkpoint') &&
+                        currentUrl.includes('facebook.com');
+
+      await context.close();
+      await browser.close();
+
+      if (isLoggedIn) {
+        return { valid: true, reason: 'Sesja aktywna', ...offlineCheck };
+      } else {
+        return { valid: false, reason: 'Sesja wygasła - cookies nieważne online' };
+      }
+
+    } catch (error) {
+      if (context) await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+      return { valid: false, reason: `Błąd walidacji online: ${error.message}` };
+    }
+  }
+
+  /**
+   * Filtruje konta - zwraca tylko te z ważnymi cookies
+   * @param {Array} accounts - lista kont
+   * @param {boolean} checkOnline - czy sprawdzać online (wolniejsze)
+   * @returns {Promise<Object>} { validAccounts: [], invalidAccounts: [] }
+   */
+  async filterValidAccounts(accounts, checkOnline = false) {
+    const validAccounts = [];
+    const invalidAccounts = [];
+
+    for (const account of accounts) {
+      if (!account.cookies) {
+        invalidAccounts.push({
+          ...account,
+          validationError: 'Brak cookies'
+        });
+        continue;
+      }
+
+      let validation;
+      if (checkOnline) {
+        this.addLog(`🔍 Sprawdzam online: ${account.name || account.email || `Konto #${account.id}`}...`, 'info');
+        validation = await this.validateCookiesOnline(account.cookies);
+      } else {
+        validation = this.validateCookies(account.cookies);
+      }
+
+      if (validation.valid) {
+        if (validation.warning) {
+          this.addLog(`⚠️ ${account.name || account.email}: ${validation.reason}`, 'warning');
+        }
+        validAccounts.push({
+          ...account,
+          cookieValidation: validation
+        });
+      } else {
+        this.addLog(`❌ ${account.name || account.email}: ${validation.reason}`, 'error');
+        invalidAccounts.push({
+          ...account,
+          validationError: validation.reason
+        });
+      }
+    }
+
+    return { validAccounts, invalidAccounts };
+  }
+
+  // =============================================
+  // PROXY MANAGEMENT - zarządzanie wieloma proxy
+  // =============================================
+
+  /**
+   * Dodaje proxy do listy
+   * @param {Object} proxy - { name, host, port, username?, password? }
+   */
+  addProxy(proxy) {
+    const proxyWithId = {
+      id: Date.now().toString(),
+      ...proxy,
+      createdAt: new Date().toISOString()
+    };
+    this.proxyList.push(proxyWithId);
+    this.store.set('proxyList', this.proxyList);
+    this.addLog(`Dodano proxy: ${proxy.name || proxy.host}:${proxy.port}`, 'success');
+    return proxyWithId;
+  }
+
+  /**
+   * Usuwa proxy z listy
+   * @param {string} proxyId - ID proxy do usunięcia
+   */
+  removeProxy(proxyId) {
+    this.proxyList = this.proxyList.filter(p => p.id !== proxyId);
+    this.store.set('proxyList', this.proxyList);
+    this.addLog(`Usunięto proxy #${proxyId}`, 'info');
+  }
+
+  /**
+   * Pobiera listę wszystkich proxy
+   */
+  getProxyList() {
+    return this.proxyList;
+  }
+
+  /**
+   * Przypisuje proxy do konta
+   * @param {string} accountId - ID konta
+   * @param {string} proxyId - ID proxy (lub null aby usunąć)
+   */
+  assignProxyToAccount(accountId, proxyId) {
+    const accounts = this.store.get('facebookAccounts', []);
+    const accountIndex = accounts.findIndex(a => a.id === accountId);
+
+    if (accountIndex >= 0) {
+      accounts[accountIndex].proxyId = proxyId;
+      this.store.set('facebookAccounts', accounts);
+
+      const proxy = proxyId ? this.proxyList.find(p => p.id === proxyId) : null;
+      this.addLog(`Konto #${accountId} → Proxy: ${proxy ? proxy.name || proxy.host : 'brak'}`, 'info');
+    }
+  }
+
+  /**
+   * Pobiera proxy przypisane do konta
+   * @param {string} accountId - ID konta
+   * @returns {Object|null} proxy lub null
+   */
+  getProxyForAccount(accountId) {
+    const accounts = this.store.get('facebookAccounts', []);
+    const account = accounts.find(a => a.id === accountId);
+
+    if (account && account.proxyId) {
+      return this.proxyList.find(p => p.id === account.proxyId) || null;
+    }
+    return null;
+  }
+
+  /**
+   * Testuje proxy
+   * @param {Object} proxy - { host, port, username?, password? }
+   */
+  async testProxy(proxy) {
+    const axios = require('axios');
+
+    try {
+      const proxyConfig = {
+        host: proxy.host,
+        port: parseInt(proxy.port)
+      };
+
+      if (proxy.username && proxy.password) {
+        proxyConfig.auth = {
+          username: proxy.username,
+          password: proxy.password
+        };
+      }
+
+      const response = await axios.get('https://api.ipify.org?format=json', {
+        proxy: proxyConfig,
+        timeout: 15000
+      });
+
+      return {
+        success: true,
+        ip: response.data.ip,
+        message: `Proxy działa! IP: ${response.data.ip}`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Proxy nie działa: ${error.message}`
+      };
+    }
   }
 
   findChromePath() {
@@ -548,43 +851,88 @@ class AutomationManager extends EventEmitter {
   }
 
   async startPostingMultiAccount(config) {
-    const { posts, accounts, delayBetweenPosts } = config;
-    
+    const { posts, accounts, delayBetweenPosts, validateCookiesOnline = false } = config;
+
     this.addLog(`🚀 Rozpoczynam postowanie wielokontowe`, 'info');
-    this.addLog(`📊 Konta: ${accounts.length}`, 'info');
+    this.addLog(`📊 Konta do sprawdzenia: ${accounts.length}`, 'info');
     this.addLog(`📝 Posty: ${posts.length}`, 'info');
-    
-    // Podziel posty równomiernie między konta
-    const postsPerAccount = Math.ceil(posts.length / accounts.length);
+
+    // =============================================
+    // WALIDACJA COOKIES - przed rozpoczęciem
+    // =============================================
+    this.addLog(`\n🔍 Sprawdzam ważność cookies...`, 'info');
+
+    const { validAccounts, invalidAccounts } = await this.filterValidAccounts(
+      accounts,
+      validateCookiesOnline
+    );
+
+    // Podsumowanie walidacji
+    if (invalidAccounts.length > 0) {
+      this.addLog(`\n⚠️ Konta z nieważnymi cookies (pominięte):`, 'warning');
+      for (const acc of invalidAccounts) {
+        this.addLog(`   ❌ ${acc.name || acc.email || `Konto #${acc.id}`}: ${acc.validationError}`, 'error');
+      }
+    }
+
+    if (validAccounts.length === 0) {
+      throw new Error('Brak kont z ważnymi cookies! Odśwież cookies i spróbuj ponownie.');
+    }
+
+    this.addLog(`\n✅ Konta z ważnymi cookies: ${validAccounts.length}/${accounts.length}`, 'success');
+
+    // =============================================
+    // PODZIAŁ POSTÓW między ważne konta
+    // =============================================
+    const postsPerAccount = Math.ceil(posts.length / validAccounts.length);
     const accountTasks = [];
-    
-    for (let i = 0; i < accounts.length; i++) {
+
+    for (let i = 0; i < validAccounts.length; i++) {
+      const account = validAccounts[i];
       const startIndex = i * postsPerAccount;
       const endIndex = Math.min(startIndex + postsPerAccount, posts.length);
       const accountPosts = posts.slice(startIndex, endIndex);
-      
+
       if (accountPosts.length > 0) {
+        // Pobierz proxy przypisane do konta
+        const accountProxy = account.proxyId
+          ? this.proxyList.find(p => p.id === account.proxyId)
+          : null;
+
         accountTasks.push({
           accountIndex: i + 1,
-          cookies: accounts[i].cookies,
-          posts: accountPosts
+          accountId: account.id,
+          accountName: account.name || account.email || `Konto #${account.id}`,
+          cookies: account.cookies,
+          posts: accountPosts,
+          proxy: accountProxy,  // Proxy per konto
+          cookieValidation: account.cookieValidation
         });
-        
-        this.addLog(`🔹 Konto #${i + 1}: ${accountPosts.length} postów (${startIndex + 1}-${endIndex})`, 'info');
+
+        const proxyInfo = accountProxy ? `🌐 ${accountProxy.name || accountProxy.host}` : '🔓 bez proxy';
+        this.addLog(`🔹 ${account.name || `Konto #${i + 1}`}: ${accountPosts.length} postów | ${proxyInfo}`, 'info');
       }
     }
-    
+
     this.addLog(`\n✅ Podział zakończony, uruchamiam ${accountTasks.length} instancji...`, 'success');
-    
+
     // WAŻNE: Każde konto uruchamia się w osobnym procesie (nie współdzieli this)
-    const promises = accountTasks.map(task => 
+    const promises = accountTasks.map(task =>
       this.runAccountTaskIsolated(task, delayBetweenPosts)
     );
-    
+
     try {
       await Promise.all(promises);
       this.addLog(`\n🎉 Wszystkie konta zakończyły postowanie!`, 'success');
-      return { success: true };
+      return {
+        success: true,
+        validAccounts: validAccounts.length,
+        invalidAccounts: invalidAccounts.length,
+        skippedAccounts: invalidAccounts.map(a => ({
+          name: a.name || a.email,
+          reason: a.validationError
+        }))
+      };
     } catch (error) {
       this.addLog(`\n❌ Błąd w jednym z kont: ${error.message}`, 'error');
       throw error;
@@ -592,10 +940,11 @@ class AutomationManager extends EventEmitter {
   }
 
   async runAccountTaskIsolated(task, delayBetweenPosts) {
-    const { accountIndex, cookies, posts } = task;
+    const { accountIndex, accountName, cookies, posts, proxy } = task;
     const { chromium } = require('playwright');
 
-    this.addLog(`\n[Konto #${accountIndex}] Inicjalizuję przeglądarkę Playwright...`, 'info');
+    const logPrefix = `[${accountName || `Konto #${accountIndex}`}]`;
+    this.addLog(`\n${logPrefix} Inicjalizuję przeglądarkę Playwright...`, 'info');
 
     // Znajdź Chrome
     const executablePath = this.findChromePath();
@@ -603,8 +952,8 @@ class AutomationManager extends EventEmitter {
     // Wygeneruj fingerprint dla tego konta
     const fingerprint = this.fingerprintManager.generateFingerprint(accountIndex);
 
-    // Uruchom osobną instancję przeglądarki dla tego konta (Playwright)
-    const browser = await chromium.launch({
+    // Playwright launch options z proxy per konto
+    const launchOptions = {
       headless: false,
       executablePath: executablePath || undefined,
       args: [
@@ -618,7 +967,22 @@ class AutomationManager extends EventEmitter {
         '--disable-dev-shm-usage',
         '--no-first-run'
       ]
-    });
+    };
+
+    // Dodaj proxy jeśli przypisane do konta
+    if (proxy && proxy.host && proxy.port) {
+      launchOptions.proxy = {
+        server: `http://${proxy.host}:${proxy.port}`,
+        username: proxy.username || undefined,
+        password: proxy.password || undefined
+      };
+      this.addLog(`${logPrefix} 🌐 Używam proxy: ${proxy.name || proxy.host}:${proxy.port}`, 'info');
+    } else {
+      this.addLog(`${logPrefix} 🔓 Bez proxy`, 'info');
+    }
+
+    // Uruchom osobną instancję przeglądarki dla tego konta (Playwright)
+    const browser = await chromium.launch(launchOptions);
 
     // Playwright: context z fingerprint settings
     const context = await browser.newContext({
