@@ -224,6 +224,125 @@ ipcMain.handle('get-proxy', async () => {
   return store.get('proxy', { enabled: false, host: '', port: '' });
 });
 
+// =============================================
+// COOKIE VALIDATION HANDLERS
+// =============================================
+
+ipcMain.handle('validate-cookies', async (event, cookies) => {
+  return automationManager.validateCookies(cookies);
+});
+
+ipcMain.handle('validate-cookies-online', async (event, cookies) => {
+  return await automationManager.validateCookiesOnline(cookies);
+});
+
+ipcMain.handle('filter-valid-accounts', async (event, { accounts, checkOnline }) => {
+  return await automationManager.filterValidAccounts(accounts, checkOnline);
+});
+
+// =============================================
+// PROXY LIST HANDLERS - wiele proxy
+// =============================================
+
+ipcMain.handle('add-proxy', async (event, proxy) => {
+  try {
+    const result = automationManager.addProxy(proxy);
+    return { success: true, proxy: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('remove-proxy', async (event, proxyId) => {
+  try {
+    automationManager.removeProxy(proxyId);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-proxy-list', async () => {
+  return automationManager.getProxyList();
+});
+
+ipcMain.handle('test-proxy', async (event, proxy) => {
+  return await automationManager.testProxy(proxy);
+});
+
+ipcMain.handle('assign-proxy-to-account', async (event, { accountId, proxyId }) => {
+  try {
+    automationManager.assignProxyToAccount(accountId, proxyId);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('get-proxy-for-account', async (event, accountId) => {
+  return automationManager.getProxyForAccount(accountId);
+});
+
+// =============================================
+// STORAGE STATE HANDLERS - lepsze zarządzanie sesjami
+// =============================================
+
+ipcMain.handle('get-storage-state-path', async (event, accountId) => {
+  return automationManager.getStorageStatePath(accountId);
+});
+
+ipcMain.handle('check-cookie-refresh-needed', async (event, accountId) => {
+  return automationManager.checkCookieRefreshNeeded(accountId);
+});
+
+ipcMain.handle('refresh-account-cookies', async (event, { accountId, account }) => {
+  return await automationManager.refreshAccountCookies(accountId, account);
+});
+
+ipcMain.handle('get-accounts-needing-refresh', async () => {
+  return automationManager.getAccountsNeedingRefresh();
+});
+
+// =============================================
+// CONCURRENT ACCOUNTS LIMIT HANDLERS
+// =============================================
+
+ipcMain.handle('set-max-concurrent-accounts', async (event, maxAccounts) => {
+  automationManager.maxConcurrentAccounts = Math.min(Math.max(1, maxAccounts), 10);
+  return { success: true, maxConcurrentAccounts: automationManager.maxConcurrentAccounts };
+});
+
+ipcMain.handle('get-max-concurrent-accounts', async () => {
+  return automationManager.maxConcurrentAccounts;
+});
+
+// =============================================
+// SCREENSHOTS DIRECTORY
+// =============================================
+
+ipcMain.handle('get-screenshots-dir', async () => {
+  return automationManager.screenshotsDir;
+});
+
+ipcMain.handle('list-error-screenshots', async () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  try {
+    const files = fs.readdirSync(automationManager.screenshotsDir);
+    return files
+      .filter(f => f.endsWith('.png'))
+      .map(f => ({
+        name: f,
+        path: path.join(automationManager.screenshotsDir, f),
+        timestamp: fs.statSync(path.join(automationManager.screenshotsDir, f)).mtime
+      }))
+      .sort((a, b) => b.timestamp - a.timestamp);
+  } catch (error) {
+    return [];
+  }
+});
+
 function sendNotification(title, body) {
   if (Notification.isSupported()) {
     new Notification({ title, body }).show();
