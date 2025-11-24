@@ -1024,3 +1024,251 @@ document.getElementById('regenerateTokenBtn')?.addEventListener('click', async (
 if (document.getElementById('settings')) {
     loadApiToken();
 }
+
+// ===== NOWY UI POSTOWANIA =====
+
+// Przełączanie zakładek źródła postów (CSV vs Ręcznie)
+document.querySelectorAll('.posting-source-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        const source = tab.dataset.source;
+
+        // Aktualizuj aktywną zakładkę
+        document.querySelectorAll('.posting-source-tab').forEach(t => {
+            t.classList.remove('active');
+            t.classList.remove('btn-primary');
+            t.classList.add('btn-secondary');
+        });
+        tab.classList.add('active');
+        tab.classList.remove('btn-secondary');
+        tab.classList.add('btn-primary');
+
+        // Pokaż/ukryj odpowiednie sekcje
+        document.getElementById('postingSourceCsv').style.display = source === 'csv' ? 'block' : 'none';
+        document.getElementById('postingSourceManual').style.display = source === 'manual' ? 'block' : 'none';
+
+        // Aktualizuj liczniki
+        updatePreStartStatus();
+    });
+});
+
+// Renderowanie listy kont z walidacją
+function renderAccountsList() {
+    const accountsList = document.getElementById('accountsList');
+    if (!accountsList) return;
+
+    accountsList.innerHTML = '';
+
+    for (let i = 0; i < accountsCount; i++) {
+        const textarea = document.getElementById(`account-${i}-cookies`);
+        const hasValidJson = textarea ? isValidJson(textarea.value) : false;
+
+        const accountDiv = document.createElement('div');
+        accountDiv.className = 'account-item';
+        accountDiv.id = `account-container-${i}`;
+        accountDiv.style.cssText = 'background: #1a1a1a; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #333;';
+
+        accountDiv.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span id="account-${i}-status" style="font-size: 18px;">⏳</span>
+                    <input type="text" id="account-${i}-name" placeholder="Nazwa konta"
+                           value="Konto #${i + 1}"
+                           style="background: transparent; border: none; color: #00ff88; font-weight: bold; font-size: 14px; width: 150px;">
+                </div>
+                <div style="display: flex; gap: 5px;">
+                    <select id="account-${i}-proxy" style="padding: 5px; font-size: 11px; background: #222; border: 1px solid #444; color: #fff; border-radius: 3px;">
+                        <option value="">🔓 Bez proxy</option>
+                    </select>
+                    <button class="btn btn-danger btn-sm remove-account-btn" data-index="${i}" style="padding: 5px 10px; font-size: 11px;">
+                        🗑️
+                    </button>
+                </div>
+            </div>
+            <textarea
+                id="account-${i}-cookies"
+                rows="3"
+                class="form-control"
+                style="font-size: 11px; font-family: monospace;"
+                placeholder='[{"name":"c_user","value":"xxx","domain":".facebook.com"}]'
+            >${textarea ? textarea.value : ''}</textarea>
+        `;
+
+        accountsList.appendChild(accountDiv);
+    }
+
+    // Dodaj event listenery
+    document.querySelectorAll('.remove-account-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const idx = this.dataset.index;
+            document.getElementById(`account-container-${idx}`)?.remove();
+            updatePreStartStatus();
+        });
+    });
+
+    // Załaduj listę proxy
+    loadProxyListForAccounts();
+}
+
+// Sprawdź czy JSON jest poprawny
+function isValidJson(str) {
+    if (!str || !str.trim()) return false;
+    try {
+        const parsed = JSON.parse(str.trim());
+        return Array.isArray(parsed) && parsed.length > 0;
+    } catch {
+        return false;
+    }
+}
+
+// Walidacja wszystkich kont
+document.getElementById('validateAllAccountsBtn')?.addEventListener('click', async () => {
+    showToast('Sprawdzam cookies...', 'info');
+
+    const containers = document.querySelectorAll('[id^="account-container-"]');
+    let validCount = 0;
+
+    for (const container of containers) {
+        const idx = container.id.replace('account-container-', '');
+        const textarea = document.getElementById(`account-${idx}-cookies`);
+        const statusEl = document.getElementById(`account-${idx}-status`);
+
+        if (!textarea || !textarea.value.trim()) {
+            if (statusEl) statusEl.textContent = '❌';
+            continue;
+        }
+
+        const validation = await ipcRenderer.invoke('validate-cookies', textarea.value.trim());
+
+        if (validation.valid) {
+            if (statusEl) statusEl.textContent = '✅';
+            validCount++;
+        } else {
+            if (statusEl) statusEl.textContent = '❌';
+        }
+    }
+
+    document.getElementById('validAccountsCount').textContent = validCount;
+    showToast(`Sprawdzono: ${validCount} ważnych kont`, validCount > 0 ? 'success' : 'warning');
+    updatePreStartStatus();
+});
+
+// Aktualizuj status przed uruchomieniem
+function updatePreStartStatus() {
+    // Policz konta z cookies
+    let validAccounts = 0;
+    const containers = document.querySelectorAll('[id^="account-container-"]');
+
+    containers.forEach(container => {
+        const idx = container.id.replace('account-container-', '');
+        const textarea = document.getElementById(`account-${idx}-cookies`);
+        if (textarea && isValidJson(textarea.value)) {
+            validAccounts++;
+        }
+    });
+
+    // Policz posty
+    let postsCount = 0;
+    const csvSourceActive = document.querySelector('.posting-source-tab[data-source="csv"]')?.classList.contains('active');
+
+    if (csvSourceActive && csvData && csvData.length > 0) {
+        postsCount = csvData.length;
+    } else {
+        const groupsList = document.getElementById('groupsList');
+        if (groupsList && groupsList.value.trim()) {
+            postsCount = groupsList.value.trim().split('\n').filter(g => g.trim()).length;
+        }
+    }
+
+    // Aktualizuj UI
+    document.getElementById('validAccountsCount').textContent = validAccounts;
+    document.getElementById('postsToPublishCount').textContent = postsCount;
+
+    if (validAccounts > 0 && postsCount > 0) {
+        const postsPerAccount = Math.ceil(postsCount / validAccounts);
+        document.getElementById('postsPerAccountCount').textContent = `~${postsPerAccount}`;
+    } else {
+        document.getElementById('postsPerAccountCount').textContent = '-';
+    }
+}
+
+// Załaduj listę proxy do dropdownów kont
+async function loadProxyListForAccounts() {
+    try {
+        const proxyList = await ipcRenderer.invoke('get-proxy-list');
+
+        document.querySelectorAll('[id^="account-"][id$="-proxy"]').forEach(select => {
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">🔓 Bez proxy</option>';
+
+            proxyList.forEach(proxy => {
+                const option = document.createElement('option');
+                option.value = proxy.id;
+                option.textContent = `🌐 ${proxy.name || proxy.host}`;
+                select.appendChild(option);
+            });
+
+            if (currentValue) {
+                select.value = currentValue;
+            }
+        });
+    } catch (err) {
+        console.error('Error loading proxy list:', err);
+    }
+}
+
+// Nasłuchuj zmian w CSV i grupach
+document.getElementById('groupsList')?.addEventListener('input', updatePreStartStatus);
+document.getElementById('csvFileInput')?.addEventListener('change', () => {
+    setTimeout(updatePreStartStatus, 500);
+});
+
+// Inicjalizacja przy starcie
+setTimeout(() => {
+    renderAccountsList();
+    updatePreStartStatus();
+}, 600);
+
+// Nadpisz addAccountBtn żeby używało nowego renderera
+const originalAddAccount = document.getElementById('addAccountBtn')?.onclick;
+document.getElementById('addAccountBtn')?.addEventListener('click', () => {
+    accountsCount++;
+    renderAccountsList();
+    updatePreStartStatus();
+});
+
+// Nadpisz saveAllAccountsBtn żeby zapisywało nowe pola
+document.getElementById('saveAllAccountsBtn')?.removeEventListener('click', () => {});
+document.getElementById('saveAllAccountsBtn')?.addEventListener('click', async () => {
+    const accounts = [];
+
+    const containers = document.querySelectorAll('[id^="account-container-"]');
+    containers.forEach(container => {
+        const idx = container.id.replace('account-container-', '');
+        const textarea = document.getElementById(`account-${idx}-cookies`);
+        const nameInput = document.getElementById(`account-${idx}-name`);
+        const proxySelect = document.getElementById(`account-${idx}-proxy`);
+
+        if (textarea && textarea.value.trim()) {
+            try {
+                JSON.parse(textarea.value.trim());
+                accounts.push({
+                    id: `acc_${idx}_${Date.now()}`,
+                    name: nameInput?.value || `Konto #${parseInt(idx) + 1}`,
+                    cookies: textarea.value.trim(),
+                    proxyId: proxySelect?.value || null
+                });
+            } catch (error) {
+                showToast(`Błąd w ${nameInput?.value || `Konto #${parseInt(idx) + 1}`}: Nieprawidłowy JSON`, 'error');
+            }
+        }
+    });
+
+    if (accounts.length === 0) {
+        showToast('Dodaj przynajmniej jedno konto z cookies', 'error');
+        return;
+    }
+
+    await ipcRenderer.invoke('save-all-accounts', accounts);
+    showToast(`✅ Zapisano ${accounts.length} kont`, 'success');
+    updatePreStartStatus();
+});

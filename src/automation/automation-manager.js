@@ -1221,6 +1221,9 @@ class AutomationManager extends EventEmitter {
     // =============================================
     // MAX 5 KONT JEDNOCZEŚNIE - kontrola przepustowości
     // =============================================
+    this.isRunning = true;
+    this.emit('status-change', this.getStatus());
+
     const results = [];
     const errors = [];
 
@@ -1229,9 +1232,21 @@ class AutomationManager extends EventEmitter {
       const executing = new Set();
 
       for (const task of tasks) {
+        // ⚠️ SPRAWDŹ CZY NIE ZATRZYMANO
+        if (!this.isRunning) {
+          this.addLog(`⏹️ Automatyzacja zatrzymana - nie uruchamiam więcej kont`, 'warning');
+          break;
+        }
+
         // Czekaj jeśli osiągnięto limit
-        while (executing.size >= maxConcurrent) {
+        while (executing.size >= maxConcurrent && this.isRunning) {
           await Promise.race(executing);
+        }
+
+        // Ponownie sprawdź po czekaniu
+        if (!this.isRunning) {
+          this.addLog(`⏹️ Automatyzacja zatrzymana`, 'warning');
+          break;
         }
 
         const taskPromise = (async () => {
@@ -1249,17 +1264,26 @@ class AutomationManager extends EventEmitter {
 
         executing.add(taskPromise);
 
-        // Delay między uruchamianiem kolejnych kont (30-120s)
-        if (executing.size < tasks.length) {
-          const delayMs = this.activityLimiter.getDelayBetweenAccounts();
+        // Delay między uruchamianiem kolejnych kont (30-60s) - jeśli są jeszcze konta
+        const remainingTasks = tasks.indexOf(task) < tasks.length - 1;
+        if (remainingTasks && this.isRunning) {
+          const delayMs = 30000 + Math.random() * 30000; // 30-60s
           const delaySec = Math.round(delayMs / 1000);
           this.addLog(`⏳ Czekam ${delaySec}s przed następnym kontem...`, 'info');
-          await new Promise(resolve => setTimeout(resolve, delayMs));
+
+          // Czekaj z możliwością przerwania
+          const waitStart = Date.now();
+          while (Date.now() - waitStart < delayMs && this.isRunning) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
         }
       }
 
-      // Czekaj na zakończenie wszystkich zadań
-      await Promise.all(executing);
+      // Czekaj na zakończenie wszystkich aktywnych zadań
+      if (executing.size > 0) {
+        this.addLog(`⏳ Czekam na zakończenie ${executing.size} aktywnych kont...`, 'info');
+        await Promise.all(executing);
+      }
     };
 
     try {
@@ -1268,7 +1292,11 @@ class AutomationManager extends EventEmitter {
       const successCount = results.filter(r => r.success).length;
       const errorCount = errors.length;
 
-      this.addLog(`\n🎉 Zakończono! Sukces: ${successCount}, Błędy: ${errorCount}`, 'success');
+      if (this.isRunning) {
+        this.addLog(`\n🎉 Zakończono! Sukces: ${successCount}, Błędy: ${errorCount}`, 'success');
+      } else {
+        this.addLog(`\n⏹️ Zatrzymano przez użytkownika. Sukces: ${successCount}, Błędy: ${errorCount}`, 'warning');
+      }
 
       return {
         success: errorCount === 0,
@@ -1281,11 +1309,16 @@ class AutomationManager extends EventEmitter {
         skippedAccounts: invalidAccounts.map(a => ({
           name: a.name || a.email,
           reason: a.validationError
-        }))
+        })),
+        stoppedByUser: !this.isRunning
       };
     } catch (error) {
       this.addLog(`\n❌ Krytyczny błąd: ${error.message}`, 'error');
       throw error;
+    } finally {
+      // Zawsze resetuj stan
+      this.isRunning = false;
+      this.emit('status-change', this.getStatus());
     }
   }
 
@@ -1293,7 +1326,13 @@ class AutomationManager extends EventEmitter {
     const { accountIndex, accountName, cookies, posts, proxy } = task;
     const { chromium } = require('playwright');
 
-    const logPrefix = `[${accountName || `Konto #${accountIndex}`}]`;
+    // SPRAWDŹ CZY AUTOMATYZACJA NIE ZOSTAŁA ZATRZYMANA
+    if (!this.isRunning) {
+      this.addLog(`[${accountName}] ⏹️ Automatyzacja zatrzymana - pomijam`, 'warning');
+      return;
+    }
+
+    const logPrefix = `[${accountName}]`;
     this.addLog(`\n${logPrefix} Inicjalizuję przeglądarkę Playwright...`, 'info');
 
     // Znajdź Chrome
@@ -1331,26 +1370,30 @@ class AutomationManager extends EventEmitter {
       this.addLog(`${logPrefix} 🔓 Bez proxy`, 'info');
     }
 
-    // Uruchom osobną instancję przeglądarki dla tego konta (Playwright)
-    const browser = await chromium.launch(launchOptions);
+    let browser = null;
+    let context = null;
+    let page = null;
 
-    // Playwright: context z fingerprint settings
-    const context = await browser.newContext({
-      viewport: { width: 1366, height: 768 },
-      userAgent: fingerprint.userAgent,
-      locale: fingerprint.locale,
-      timezoneId: fingerprint.timezone
-    });
-
-    // Wstrzyknij skrypty stealth
-    const stealthScripts = this.fingerprintManager.getStealthScripts(fingerprint);
-    for (const script of stealthScripts) {
-      await context.addInitScript(script);
-    }
-
-    const page = await context.newPage();
-    
     try {
+      // Uruchom osobną instancję przeglądarki dla tego konta (Playwright)
+      browser = await chromium.launch(launchOptions);
+
+      // Playwright: context z fingerprint settings
+      context = await browser.newContext({
+        viewport: { width: 1366, height: 768 },
+        userAgent: fingerprint.userAgent,
+        locale: fingerprint.locale,
+        timezoneId: fingerprint.timezone
+      });
+
+      // Wstrzyknij skrypty stealth
+      const stealthScripts = this.fingerprintManager.getStealthScripts(fingerprint);
+      for (const script of stealthScripts) {
+        await context.addInitScript(script);
+      }
+
+      page = await context.newPage();
+
       // Załaduj cookies
       const parsedCookies = JSON.parse(cookies);
       const normalizedCookies = parsedCookies.map(cookie => ({
@@ -1368,33 +1411,93 @@ class AutomationManager extends EventEmitter {
 
       // Playwright: addCookies na context
       await context.addCookies(normalizedCookies);
-      this.addLog(`[Konto #${accountIndex}] ✅ Cookies załadowane`, 'success');
+      this.addLog(`${logPrefix} ✅ Cookies załadowane`, 'success');
 
-      // Przejdź na Facebook
-      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
-      await randomDelay(3000, 5000);
-      
-      const currentUrl = page.url();
-      if (currentUrl.includes('facebook.com') && !currentUrl.includes('login')) {
-        this.addLog(`[Konto #${accountIndex}] ✅ Zalogowano!`, 'success');
-      } else {
-        throw new Error(`Konto #${accountIndex}: Cookies nie zadziałały`);
+      // Przejdź na Facebook z lepszym timeout handling
+      this.addLog(`${logPrefix} Otwieram Facebook...`, 'info');
+
+      try {
+        // Użyj domcontentloaded zamiast networkidle (szybsze i stabilniejsze)
+        await page.goto('https://www.facebook.com/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 45000
+        });
+        // Poczekaj na załadowanie strony
+        await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+      } catch (navError) {
+        this.addLog(`${logPrefix} ⚠️ Timeout nawigacji: ${navError.message}`, 'warning');
+        // Spróbuj kontynuować jeśli strona częściowo się załadowała
       }
-      
-      // Postuj do każdej grupy - INLINE kod z postToGroup (bez współdzielenia this.page)
+
+      await randomDelay(3000, 5000);
+
+      // SPRAWDŹ CZY AUTOMATYZACJA NIE ZOSTAŁA ZATRZYMANA
+      if (!this.isRunning) {
+        this.addLog(`${logPrefix} ⏹️ Automatyzacja zatrzymana`, 'warning');
+        await browser.close();
+        return;
+      }
+
+      // DOKŁADNA WERYFIKACJA CZY ZALOGOWANO
+      const currentUrl = page.url();
+      const isOnLoginPage = currentUrl.includes('login') ||
+                           currentUrl.includes('checkpoint') ||
+                           currentUrl.includes('/recover');
+
+      // Sprawdź dodatkowe wskaźniki logowania
+      const isLoggedIn = await page.evaluate(() => {
+        // Sprawdź czy są elementy zalogowanego użytkownika
+        const hasNavigation = document.querySelector('[role="navigation"]') !== null;
+        const hasLoginForm = document.querySelector('#email') !== null &&
+                            document.querySelector('#pass') !== null;
+        const hasProfileLinks = document.querySelector('[aria-label*="profil"]') !== null ||
+                               document.querySelector('[aria-label*="Profile"]') !== null ||
+                               document.querySelector('[aria-label*="konto"]') !== null ||
+                               document.querySelector('[aria-label*="Account"]') !== null;
+
+        return hasNavigation && !hasLoginForm;
+      }).catch(() => false);
+
+      if (isOnLoginPage || !isLoggedIn) {
+        this.addLog(`${logPrefix} ❌ NIE ZALOGOWANO - cookies nieważne!`, 'error');
+        this.addLog(`${logPrefix} URL: ${currentUrl}`, 'info');
+
+        // Screenshot błędu
+        await this.captureErrorScreenshot(page, 'login_failed', task.accountId);
+
+        throw new Error(`Cookies nieważne dla konta ${accountName} - wymagane ponowne logowanie`);
+      }
+
+      this.addLog(`${logPrefix} ✅ Zalogowano pomyślnie!`, 'success');
+
+      // Postuj do każdej grupy
       for (let i = 0; i < posts.length; i++) {
+        // SPRAWDŹ CZY AUTOMATYZACJA NIE ZOSTAŁA ZATRZYMANA
+        if (!this.isRunning) {
+          this.addLog(`${logPrefix} ⏹️ Automatyzacja zatrzymana - przerywam postowanie`, 'warning');
+          break;
+        }
+
         const post = posts[i];
-        this.addLog(`[Konto #${accountIndex}] [${i + 1}/${posts.length}] Postuję do: ${post.groupLink}`, 'info');
-        
-        // INLINE kod postowania (nie używa this.page)
-        await this.postToGroupInline(page, post.groupLink, post.postCopy, accountIndex);
-        
-        if (i < posts.length - 1) {
-          await randomDelay(delayBetweenPosts * 1000, (delayBetweenPosts + 30) * 1000);
+        this.addLog(`${logPrefix} [${i + 1}/${posts.length}] Postuję do: ${post.groupLink}`, 'info');
+
+        try {
+          await this.postToGroupInline(page, post.groupLink, post.postCopy, accountName);
+        } catch (postError) {
+          this.addLog(`${logPrefix} ⚠️ Błąd postu: ${postError.message}`, 'error');
+          // Kontynuuj z następnym postem zamiast przerywać
+          continue;
+        }
+
+        if (i < posts.length - 1 && this.isRunning) {
+          const delay = delayBetweenPosts * 1000 + Math.random() * 30000;
+          const delayMin = Math.round(delay / 60000 * 10) / 10;
+          this.addLog(`${logPrefix} ⏳ Czekam ${delayMin} min przed następnym postem...`, 'info');
+          await randomDelay(delay * 0.9, delay * 1.1);
         }
       }
-      
-      this.addLog(`[Konto #${accountIndex}] ✅ Zakończono postowanie (${posts.length} postów)`, 'success');
+
+      this.addLog(`${logPrefix} ✅ Zakończono postowanie`, 'success');
 
       // Zapisz storageState po udanym postowaniu
       try {
@@ -1404,28 +1507,44 @@ class AutomationManager extends EventEmitter {
       }
 
     } catch (error) {
-      this.addLog(`[Konto #${accountIndex}] ❌ Błąd: ${error.message}`, 'error');
+      this.addLog(`${logPrefix} ❌ Błąd: ${error.message}`, 'error');
 
       // 📸 SCREENSHOT NA BŁĘDZIE
       if (page) {
-        await this.captureErrorScreenshot(page, 'task_error', task.accountId);
+        await this.captureErrorScreenshot(page, 'task_error', task.accountId).catch(() => {});
       }
 
       throw error;
     } finally {
-      await browser.close();
+      // Zawsze zamknij przeglądarkę
+      if (browser) {
+        await browser.close().catch(() => {});
+      }
     }
   }
 
-  async postToGroupInline(page, groupUrl, message, accountIndex) {
-    // KOPIA postToGroup ale używa page zamiast this.page i dodaje [Konto #X] do logów
-    
+  async postToGroupInline(page, groupUrl, message, accountName) {
+    // KOPIA postToGroup ale używa page zamiast this.page
+    const logPrefix = `[${accountName}]`;
+
     try {
-      this.addLog(`[Konto #${accountIndex}] Postuję do grupy: ${groupUrl}`, 'info');
-      
-      await page.goto(groupUrl, { waitUntil: 'networkidle' });
+      this.addLog(`${logPrefix} Postuję do grupy: ${groupUrl}`, 'info');
+
+      // Nawigacja z lepszym timeout handling
+      try {
+        await page.goto(groupUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 45000
+        });
+        // Poczekaj na załadowanie treści
+        await page.waitForLoadState('load', { timeout: 30000 }).catch(() => {});
+      } catch (navError) {
+        this.addLog(`${logPrefix} ⚠️ Wolne ładowanie strony: ${navError.message}`, 'warning');
+        // Kontynuuj mimo timeout
+      }
+
       await randomDelay(5000, 7000);
-      
+
       const currentUrl = page.url();
       if (!currentUrl.includes('facebook.com/groups')) {
         throw new Error('Nie udało się przejść do grupy');
@@ -1435,7 +1554,7 @@ class AutomationManager extends EventEmitter {
       await page.evaluate(() => window.scrollTo(0, 0));
       await randomDelay(2000, 3000);
 
-      this.addLog(`[Konto #${accountIndex}] Szukam przycisku do tworzenia posta...`, 'info');
+      this.addLog(`${logPrefix} Szukam przycisku do tworzenia posta...`, 'info');
 
       // METODA 1: Znajdź przycisk "Napisz coś..."
       const createPostButton = await page.evaluate(() => {
@@ -1475,9 +1594,9 @@ class AutomationManager extends EventEmitter {
           const button = document.querySelector('[data-post-create-button="true"]');
           if (button) button.click();
         });
-        this.addLog(`[Konto #${accountIndex}] ✅ Kliknięto przycisk tworzenia posta`, 'success');
+        this.addLog(`${logPrefix} ✅ Kliknięto przycisk tworzenia posta`, 'success');
       } else {
-        this.addLog(`[Konto #${accountIndex}] Próbuję alternatywnej metody (XPath)...`, 'info');
+        this.addLog(`${logPrefix} Próbuję alternatywnej metody (XPath)...`, 'info');
         
         const clicked = await page.evaluate(() => {
           const getElementByXpath = (xpath) => {
@@ -1516,9 +1635,9 @@ class AutomationManager extends EventEmitter {
         });
         
         if (clicked) {
-          this.addLog(`[Konto #${accountIndex}] ✅ Kliknięto przycisk (XPath)`, 'success');
+          this.addLog(`${logPrefix} ✅ Kliknięto przycisk (XPath)`, 'success');
         } else {
-          this.addLog(`[Konto #${accountIndex}] Nie znaleziono przycisku, próbuję klawiaturą...`, 'warning');
+          this.addLog(`${logPrefix} Nie znaleziono przycisku, próbuję klawiaturą...`, 'warning');
           await page.keyboard.press('Tab');
           await randomDelay(500, 1000);
           await page.keyboard.press('Enter');
@@ -1526,11 +1645,11 @@ class AutomationManager extends EventEmitter {
       }
 
       // Poczekaj na modal
-      this.addLog(`[Konto #${accountIndex}] Czekam na otwarcie okna...`, 'info');
+      this.addLog(`${logPrefix} Czekam na otwarcie okna...`, 'info');
       await randomDelay(4000, 6000);
 
       // Znajdź pole tekstowe
-      this.addLog(`[Konto #${accountIndex}] Szukam pola tekstowego...`, 'info');
+      this.addLog(`${logPrefix} Szukam pola tekstowego...`, 'info');
       
       const textAreaSelector = 'div[contenteditable="true"][role="textbox"]';
       await page.waitForSelector(textAreaSelector, { timeout: 15000 });
@@ -1557,7 +1676,7 @@ class AutomationManager extends EventEmitter {
       }
       
       // Kliknij w pole i upewnij się że jest aktywne
-      this.addLog(`[Konto #${accountIndex}] Aktywuję pole tekstowe...`, 'info');
+      this.addLog(`${logPrefix} Aktywuję pole tekstowe...`, 'info');
       
       const fieldActivated = await page.evaluate(() => {
         const area = document.querySelector('[data-post-textarea="true"]');
@@ -1576,11 +1695,11 @@ class AutomationManager extends EventEmitter {
         };
       });
       
-      this.addLog(`[Konto #${accountIndex}] Pole: widoczne=${fieldActivated.visible}, focus=${fieldActivated.focused}, editable=${fieldActivated.editable}`, 'info');
+      this.addLog(`${logPrefix} Pole: widoczne=${fieldActivated.visible}, focus=${fieldActivated.focused}, editable=${fieldActivated.editable}`, 'info');
       
       await randomDelay(1000, 1500);
       
-      this.addLog(`[Konto #${accountIndex}] Wklejam treść posta...`, 'info');
+      this.addLog(`${logPrefix} Wklejam treść posta...`, 'info');
       
       // keyboard.type() z Shift+Enter dla wieloliniowego tekstu
       try {
@@ -1613,7 +1732,7 @@ class AutomationManager extends EventEmitter {
           }
         }
         
-        this.addLog(`[Konto #${accountIndex}] ✅ Wpisano ${message.length} znaków`, 'success');
+        this.addLog(`${logPrefix} ✅ Wpisano ${message.length} znaków`, 'success');
         
         // Weryfikuj że tekst jest w polu
         await randomDelay(1000, 1500);
@@ -1628,19 +1747,19 @@ class AutomationManager extends EventEmitter {
           throw new Error(`Tekst nie pojawił się w polu - tylko ${verifyText.length} znaków`);
         }
         
-        this.addLog(`[Konto #${accountIndex}] ✅ Weryfikacja OK: ${verifyText.length} znaków w polu`, 'success');
+        this.addLog(`${logPrefix} ✅ Weryfikacja OK: ${verifyText.length} znaków w polu`, 'success');
         
       } catch (error) {
-        this.addLog(`[Konto #${accountIndex}] ❌ Błąd wpisywania: ${error.message}`, 'error');
+        this.addLog(`${logPrefix} ❌ Błąd wpisywania: ${error.message}`, 'error');
         throw new Error(`Nie udało się wpisać treści: ${error.message}`);
       }
       
       // Czekaj 10 sekund
-      this.addLog(`[Konto #${accountIndex}] Czekam 10 sekund...`, 'info');
+      this.addLog(`${logPrefix} Czekam 10 sekund...`, 'info');
       await randomDelay(10000, 10500);
 
       // Znajdź przycisk Opublikuj
-      this.addLog(`[Konto #${accountIndex}] Szukam przycisku publikacji...`, 'info');
+      this.addLog(`${logPrefix} Szukam przycisku publikacji...`, 'info');
       
       const publishClicked = await page.evaluate(() => {
         const getElementByXpath = (xpath) => {
@@ -1700,14 +1819,14 @@ class AutomationManager extends EventEmitter {
         throw new Error('Nie znaleziono przycisku Opublikuj');
       }
       
-      this.addLog(`[Konto #${accountIndex}] ✅ Kliknięto publikuj`, 'success');
+      this.addLog(`${logPrefix} ✅ Kliknięto publikuj`, 'success');
       
       await randomDelay(3000, 4000);
       
-      this.addLog(`[Konto #${accountIndex}] ✅ Post opublikowany pomyślnie!`, 'success');
+      this.addLog(`${logPrefix} ✅ Post opublikowany pomyślnie!`, 'success');
 
     } catch (error) {
-      this.addLog(`[Konto #${accountIndex}] ❌ Błąd postowania: ${error.message}`, 'error');
+      this.addLog(`${logPrefix} ❌ Błąd postowania: ${error.message}`, 'error');
 
       // 📸 SCREENSHOT NA BŁĘDZIE
       await this.captureErrorScreenshot(page, 'posting_error', `account${accountIndex}`);
