@@ -592,11 +592,23 @@ async function processQueue() {
         
         post.status = 'completed';
         post.completedAt = new Date().toISOString();
-        
-        // Opóźnienie między postami (60-90s)
+
+        // ANTI-BAN: Opóźnienie między postami (4-18 minut zamiast 60-90s!)
         if (postQueue.length > 0) {
-          const delay = Math.floor(Math.random() * 30000) + 60000;
-          console.log(`[API] Waiting ${delay/1000}s before next post...`);
+          // Gaussian random dla bardziej naturalnej dystrybucji
+          const min = 4 * 60 * 1000;  // 4 minuty
+          const max = 18 * 60 * 1000; // 18 minut
+          const mean = (min + max) / 2;
+          const stdDev = (max - min) / 6;
+
+          let u = 0, v = 0;
+          while (u === 0) u = Math.random();
+          while (v === 0) v = Math.random();
+          const num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+          let delay = Math.max(min, Math.min(max, num * stdDev + mean));
+
+          const delayMinutes = Math.round(delay / 60000 * 10) / 10;
+          console.log(`[API] ⏳ Czekam ${delayMinutes} minut przed następnym postem (Anti-Ban Stack 2025)...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
         
