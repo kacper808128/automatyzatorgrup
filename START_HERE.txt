@@ -1,0 +1,156 @@
+╔══════════════════════════════════════════════════════════════╗
+║                                                              ║
+║        FACEBOOK GROUP AUTOMATION - v1.0.0                   ║
+║        Aplikacja Desktopowa do Automatyzacji                ║
+║                                                              ║
+╚══════════════════════════════════════════════════════════════╝
+
+🎉 WITAJ! Dzięki za pobranie aplikacji!
+
+════════════════════════════════════════════════════════════════
+
+📦 CO MASZ W TYM ARCHIWUM?
+
+Kompletną, działającą aplikację z:
+✅ Wszystkimi plikami źródłowymi
+✅ Prawidłową strukturą katalogów
+✅ Pełną dokumentacją
+✅ Przykładami użycia
+
+════════════════════════════════════════════════════════════════
+
+🚀 JAK ZACZĄĆ? (3 KROKI)
+
+KROK 1: Rozpakuj archiwum
+--------------------------
+Wypakuj cały folder "facebook-automation-complete" 
+w dogodne miejsce, np:
+  • ~/Documents/
+  • ~/Applications/
+  • ~/Desktop/
+
+
+KROK 2: Otwórz Terminal i przejdź do folderu
+---------------------------------------------
+cd ~/Documents/facebook-automation-complete
+
+(Zmień ścieżkę jeśli rozpakowałeś gdzie indziej)
+
+
+KROK 3: Uruchom aplikację
+--------------------------
+# Zainstaluj zależności (pierwszego razu):
+npm install
+
+# Uruchom aplikację:
+npm start
+
+GOTOWE! 🎉
+
+════════════════════════════════════════════════════════════════
+
+📚 WAŻNE PLIKI DO PRZECZYTANIA:
+
+1. QUICK_START.md      - Szybki start (5 minut)
+2. README.md           - Pełna dokumentacja  
+3. INSTALL.md          - Szczegóły instalacji
+4. FAQ.md              - Często zadawane pytania
+5. EXAMPLES.md         - Przykłady użycia
+
+════════════════════════════════════════════════════════════════
+
+⚙️ WYMAGANIA:
+
+• macOS (10.13+), Windows (10+), lub Linux
+• Node.js 16 lub nowszy
+
+Nie masz Node.js? Zainstaluj przez:
+  brew install node       (macOS)
+  https://nodejs.org      (Windows/Linux)
+
+════════════════════════════════════════════════════════════════
+
+🆘 JEŚLI COŚ NIE DZIAŁA:
+
+1. Sprawdź czy masz Node.js: node --version
+2. Przeczytaj INSTALL.md
+3. Sprawdź FAQ.md
+4. Uruchom: npm install --force
+
+════════════════════════════════════════════════════════════════
+
+✨ FUNKCJE APLIKACJI:
+
+✅ Prawdziwa automatyzacja (Puppeteer)
+✅ Szyfrowanie AES-256-GCM
+✅ Obsługa Proxy
+✅ Symulacja ludzkiego zachowania
+✅ Detekcja CAPTCHA
+✅ Planowanie tasków
+✅ Notyfikacje real-time
+
+════════════════════════════════════════════════════════════════
+
+📁 STRUKTURA PROJEKTU:
+
+facebook-automation-complete/
+├── README.md              ← Zacznij tutaj
+├── QUICK_START.md         ← Lub tutaj!
+├── package.json           ← Konfiguracja
+├── run.sh / run.bat       ← Skrypty startowe
+├── src/                   ← Kod źródłowy
+│   ├── main.js
+│   ├── automation/
+│   ├── ui/
+│   ├── utils/
+│   └── config/
+├── assets/                ← Zasoby
+└── [dokumentacja]         ← Pliki MD
+
+════════════════════════════════════════════════════════════════
+
+⚠️ WAŻNE OSTRZEŻENIE:
+
+Używanie automatyzacji może łamać regulamin Facebook.
+Używaj odpowiedzialnie i na własne ryzyko!
+
+════════════════════════════════════════════════════════════════
+
+🎯 SZYBKIE POLECENIA:
+
+cd facebook-automation-complete
+npm install              # Instalacja (raz)
+npm start               # Uruchomienie
+npm run dev             # Tryb deweloperski
+
+Lub użyj:
+./run.sh                # macOS/Linux
+run.bat                 # Windows
+
+════════════════════════════════════════════════════════════════
+
+💡 WSKAZÓWKI:
+
+• Pierwsze uruchomienie może trwać dłużej
+• Puppeteer pobierze Chromium (~150MB)
+• Zachowaj ostrożność z liczbą postów dziennie
+• Zacznij od 5-10 postów/dzień
+
+════════════════════════════════════════════════════════════════
+
+📞 POMOC I WSPARCIE:
+
+• Przeczytaj FAQ.md
+• Sprawdź dokumentację
+• Zobacz przykłady w EXAMPLES.md
+
+════════════════════════════════════════════════════════════════
+
+Miłego automatyzowania! 🚀
+
+Autor: Claude AI Assistant
+Wersja: 1.0.0
+Data: 2025-10-23
+Licencja: MIT
+
+════════════════════════════════════════════════════════════════

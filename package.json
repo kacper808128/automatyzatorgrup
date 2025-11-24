@@ -1,0 +1,64 @@
+{
+  "name": "facebook-group-automation",
+  "version": "1.3.2",
+  "description": "Aplikacja do automatyzacji postowania na grupach Facebook",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
+  },
+  "keywords": [
+    "facebook",
+    "automation",
+    "puppeteer",
+    "electron"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "puppeteer": "^23.11.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "crypto-js": "^4.2.0",
+    "axios": "^1.6.0",
+    "node-schedule": "^2.1.1",
+    "electron-store": "^8.1.0",
+    "@google/generative-ai": "^0.21.0"
+  },
+  "devDependencies": {
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4"
+  },
+  "puppeteer": {
+    "skipDownload": false
+  },
+  "build": {
+    "appId": "com.facebook.automation",
+    "productName": "Facebook Group Automation",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png",
+      "category": "Utility"
+    }
+  }
+}
