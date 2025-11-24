@@ -177,12 +177,6 @@
                             Uruchom postowanie
                         </h3>
 
-                        <div class="form-group">
-                            <label for="delayBetweenPosts">Opóźnienie między postami (sekundy):</label>
-                            <input type="number" id="delayBetweenPosts" value="90" min="60" max="600">
-                            <small>Rekomendowane: 60-120s. System automatycznie dodaje losowe odchylenie ±30s.</small>
-                        </div>
-
                         <!-- Status przed uruchomieniem -->
                         <div id="preStartStatus" style="background: #1a1a1a; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
                             <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
@@ -193,9 +187,13 @@
                                 <span>Postów do opublikowania:</span>
                                 <strong id="postsToPublishCount" style="color: #3498db;">0</strong>
                             </div>
-                            <div style="display: flex; justify-content: space-between;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
                                 <span>Postów na konto:</span>
                                 <strong id="postsPerAccountCount" style="color: #f39c12;">-</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Opóźnienie między postami:</span>
+                                <strong style="color: #9b59b6;">4-18 min (auto)</strong>
                             </div>
                         </div>
 
@@ -214,6 +212,17 @@
                                 <div class="progress-fill" id="progressFill" style="height: 100%; background: linear-gradient(90deg, #00ff88, #3498db); transition: width 0.3s;"></div>
                             </div>
                             <p id="progressText" style="text-align: center; margin-top: 10px; color: #ccc;">0 / 0 postów</p>
+                        </div>
+                    </div>
+
+                    <!-- LOGI POSTOWANIA -->
+                    <div class="card">
+                        <h3 style="margin-bottom: 15px; display: flex; align-items: center; justify-content: space-between;">
+                            <span>📋 Logi postowania</span>
+                            <button class="btn btn-secondary btn-sm" id="clearPostingLogsBtn" style="padding: 5px 10px; font-size: 12px;">🗑️ Wyczyść</button>
+                        </h3>
+                        <div id="postingLogsContainer" style="height: 300px; overflow-y: auto; background: #0a0a0a; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 12px;">
+                            <p style="color: #666;">Logi pojawią się tutaj po rozpoczęciu postowania...</p>
                         </div>
                     </div>
                 </div>
