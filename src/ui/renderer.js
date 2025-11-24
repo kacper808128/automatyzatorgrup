@@ -41,6 +41,7 @@ async function loadAllData() {
     await loadProxyConfig();
     await loadCredentials();
     renderAccountsList();
+    await renderProxyList();
     updatePreStartStatus();
 }
 
@@ -278,12 +279,9 @@ function setupEventListeners() {
     document.getElementById('stopPostingBtn')?.addEventListener('click', stopPosting);
 
     // === PROXY ===
-    document.getElementById('proxyEnabled')?.addEventListener('change', (e) => {
-        document.getElementById('proxyConfig').style.display = e.target.checked ? 'block' : 'none';
-    });
-
-    document.getElementById('saveProxyBtn')?.addEventListener('click', saveProxy);
-    document.getElementById('testProxyBtn')?.addEventListener('click', testProxy);
+    document.getElementById('addNewProxyBtn')?.addEventListener('click', addNewProxy);
+    document.getElementById('testNewProxyBtn')?.addEventListener('click', testNewProxy);
+    document.getElementById('refreshProxyListBtn')?.addEventListener('click', renderProxyList);
 
     // === LOGI ===
     document.getElementById('clearLogsBtn')?.addEventListener('click', () => {
@@ -581,50 +579,164 @@ function updatePreStartStatus() {
 }
 
 // ===== PROXY =====
-async function saveProxy() {
-    const config = {
-        enabled: document.getElementById('proxyEnabled').checked,
-        host: document.getElementById('proxyHost').value.trim(),
-        port: document.getElementById('proxyPort').value.trim(),
-        username: document.getElementById('proxyUsername').value.trim(),
-        password: document.getElementById('proxyPassword').value.trim()
-    };
+async function addNewProxy() {
+    const name = document.getElementById('newProxyName').value.trim();
+    const host = document.getElementById('newProxyHost').value.trim();
+    const port = document.getElementById('newProxyPort').value.trim();
+    const username = document.getElementById('newProxyUsername').value.trim();
+    const password = document.getElementById('newProxyPassword').value.trim();
 
-    // Jeśli enabled, dodaj też do listy proxy
-    if (config.enabled && config.host && config.port) {
-        const newProxy = {
-            id: 'proxy_' + Date.now(),
-            name: `${config.host}:${config.port}`,
-            host: config.host,
-            port: config.port,
-            username: config.username,
-            password: config.password
-        };
-        await ipcRenderer.invoke('add-proxy', newProxy);
-        await loadProxyList();
-        renderAccountsList();
+    if (!host || !port) {
+        showToast('Podaj host i port proxy', 'error');
+        return;
     }
 
-    const result = await ipcRenderer.invoke('save-proxy', config);
-    showToast(result.success ? 'Proxy zapisane' : result.error, result.success ? 'success' : 'error');
-}
-
-async function testProxy() {
-    const config = {
-        host: document.getElementById('proxyHost').value.trim(),
-        port: document.getElementById('proxyPort').value.trim(),
-        username: document.getElementById('proxyUsername').value.trim(),
-        password: document.getElementById('proxyPassword').value.trim()
+    const newProxy = {
+        name: name || `${host}:${port}`,
+        host: host,
+        port: port,
+        username: username,
+        password: password
     };
 
-    if (!config.host || !config.port) {
+    const result = await ipcRenderer.invoke('add-proxy', newProxy);
+
+    if (result.success) {
+        showToast('✅ Proxy dodane!', 'success');
+        // Wyczyść formularz
+        document.getElementById('newProxyName').value = '';
+        document.getElementById('newProxyHost').value = '';
+        document.getElementById('newProxyPort').value = '';
+        document.getElementById('newProxyUsername').value = '';
+        document.getElementById('newProxyPassword').value = '';
+
+        await loadProxyList();
+        await renderProxyList();
+        renderAccountsList();
+    } else {
+        showToast(`❌ ${result.error}`, 'error');
+    }
+}
+
+async function testNewProxy() {
+    const host = document.getElementById('newProxyHost').value.trim();
+    const port = document.getElementById('newProxyPort').value.trim();
+    const username = document.getElementById('newProxyUsername').value.trim();
+    const password = document.getElementById('newProxyPassword').value.trim();
+
+    if (!host || !port) {
         showToast('Podaj host i port proxy', 'error');
         return;
     }
 
     showToast('Testuję proxy...', 'info');
-    const result = await ipcRenderer.invoke('test-proxy', config);
-    showToast(result.success ? '✅ Proxy działa!' : `❌ ${result.error || 'Proxy nie działa'}`, result.success ? 'success' : 'error');
+    const result = await ipcRenderer.invoke('test-proxy', { host, port, username, password });
+
+    if (result.success) {
+        showToast(`✅ Proxy działa! IP: ${result.ip}`, 'success');
+    } else {
+        showToast(`❌ ${result.message || result.error || 'Proxy nie działa'}`, 'error');
+    }
+}
+
+async function renderProxyList() {
+    await loadProxyList();
+    const container = document.getElementById('proxyListContainer');
+
+    if (!container) return;
+
+    if (!proxyList || proxyList.length === 0) {
+        container.innerHTML = '<p style="color: #666;">Brak dodanych proxy...</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="border-bottom: 1px solid #333;">
+                    <th style="padding: 10px; text-align: left;">Nazwa</th>
+                    <th style="padding: 10px; text-align: left;">Host:Port</th>
+                    <th style="padding: 10px; text-align: left;">Auth</th>
+                    <th style="padding: 10px; text-align: center;">Akcje</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${proxyList.map(proxy => `
+                    <tr style="border-bottom: 1px solid #222;">
+                        <td style="padding: 10px;">${proxy.name || '-'}</td>
+                        <td style="padding: 10px;">${proxy.host}:${proxy.port}</td>
+                        <td style="padding: 10px;">${proxy.username ? '🔐 Tak' : '❌ Nie'}</td>
+                        <td style="padding: 10px; text-align: center;">
+                            <button class="btn btn-secondary btn-sm" onclick="testProxyById('${proxy.id}')">🔍 Test</button>
+                            <button class="btn btn-secondary btn-sm" onclick="editProxy('${proxy.id}')">✏️ Edytuj</button>
+                            <button class="btn btn-danger btn-sm" onclick="deleteProxy('${proxy.id}')">🗑️ Usuń</button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+async function testProxyById(proxyId) {
+    const proxy = proxyList.find(p => p.id === proxyId);
+    if (!proxy) return;
+
+    showToast('Testuję proxy...', 'info');
+    const result = await ipcRenderer.invoke('test-proxy', proxy);
+
+    if (result.success) {
+        showToast(`✅ ${proxy.name || proxy.host} działa! IP: ${result.ip}`, 'success');
+    } else {
+        showToast(`❌ ${proxy.name || proxy.host}: ${result.message || result.error}`, 'error');
+    }
+}
+
+async function editProxy(proxyId) {
+    const proxy = proxyList.find(p => p.id === proxyId);
+    if (!proxy) return;
+
+    const name = prompt('Nazwa:', proxy.name || '');
+    const host = prompt('Host:', proxy.host);
+    const port = prompt('Port:', proxy.port);
+    const username = prompt('Username (zostaw puste jeśli brak):', proxy.username || '');
+    const password = prompt('Hasło (zostaw puste jeśli brak):', proxy.password || '');
+
+    if (host && port) {
+        const updates = {
+            name: name || `${host}:${port}`,
+            host: host,
+            port: port,
+            username: username,
+            password: password
+        };
+
+        const result = await ipcRenderer.invoke('update-proxy', { proxyId, updates });
+
+        if (result.success) {
+            showToast('✅ Proxy zaktualizowane!', 'success');
+            await loadProxyList();
+            await renderProxyList();
+            renderAccountsList();
+        } else {
+            showToast(`❌ ${result.error}`, 'error');
+        }
+    }
+}
+
+async function deleteProxy(proxyId) {
+    if (!confirm('Czy na pewno usunąć to proxy?')) return;
+
+    const result = await ipcRenderer.invoke('remove-proxy', proxyId);
+
+    if (result.success) {
+        showToast('✅ Proxy usunięte!', 'success');
+        await loadProxyList();
+        await renderProxyList();
+        renderAccountsList();
+    } else {
+        showToast(`❌ ${result.error}`, 'error');
+    }
 }
 
 // ===== IPC LISTENERS =====

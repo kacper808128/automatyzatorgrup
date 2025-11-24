@@ -569,6 +569,26 @@ class AutomationManager extends EventEmitter {
   }
 
   /**
+   * Aktualizuje istniejące proxy
+   * @param {string} proxyId - ID proxy do aktualizacji
+   * @param {Object} updates - Nowe dane { name?, host?, port?, username?, password? }
+   */
+  updateProxy(proxyId, updates) {
+    const index = this.proxyList.findIndex(p => p.id === proxyId);
+    if (index >= 0) {
+      this.proxyList[index] = {
+        ...this.proxyList[index],
+        ...updates,
+        updatedAt: new Date().toISOString()
+      };
+      this.store.set('proxyList', this.proxyList);
+      this.addLog(`Zaktualizowano proxy #${proxyId}`, 'info');
+      return this.proxyList[index];
+    }
+    return null;
+  }
+
+  /**
    * Pobiera listę wszystkich proxy
    */
   getProxyList() {
@@ -609,38 +629,65 @@ class AutomationManager extends EventEmitter {
   }
 
   /**
-   * Testuje proxy
+   * Testuje proxy używając Playwright
    * @param {Object} proxy - { host, port, username?, password? }
    */
   async testProxy(proxy) {
-    const axios = require('axios');
+    let browser = null;
+    let context = null;
 
     try {
-      const proxyConfig = {
-        host: proxy.host,
-        port: parseInt(proxy.port)
-      };
+      // Przygotuj konfigurację proxy dla Playwright
+      let proxyConfig = `http://${proxy.host}:${proxy.port}`;
 
       if (proxy.username && proxy.password) {
-        proxyConfig.auth = {
-          username: proxy.username,
-          password: proxy.password
-        };
+        proxyConfig = `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
       }
 
-      const response = await axios.get('https://api.ipify.org?format=json', {
-        proxy: proxyConfig,
+      // Uruchom przeglądarkę z proxy
+      browser = await this.playwright.chromium.launch({
+        headless: true,
+        proxy: {
+          server: proxyConfig
+        }
+      });
+
+      context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      });
+
+      const page = await context.newPage();
+
+      // Sprawdź IP przez proxy
+      await page.goto('https://api.ipify.org?format=json', {
+        waitUntil: 'domcontentloaded',
         timeout: 15000
       });
 
+      const content = await page.textContent('body');
+      const data = JSON.parse(content);
+
+      await page.close();
+      await context.close();
+      await browser.close();
+
       return {
         success: true,
-        ip: response.data.ip,
-        message: `Proxy działa! IP: ${response.data.ip}`
+        ip: data.ip,
+        message: `Proxy działa! IP: ${data.ip}`
       };
     } catch (error) {
+      // Zamknij zasoby w razie błędu
+      try {
+        if (context) await context.close();
+        if (browser) await browser.close();
+      } catch (e) {
+        // Ignoruj błędy zamykania
+      }
+
       return {
         success: false,
+        error: error.message,
         message: `Proxy nie działa: ${error.message}`
       };
     }
