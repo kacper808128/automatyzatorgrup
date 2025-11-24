@@ -283,6 +283,66 @@ ipcMain.handle('get-proxy-for-account', async (event, accountId) => {
   return automationManager.getProxyForAccount(accountId);
 });
 
+// =============================================
+// STORAGE STATE HANDLERS - lepsze zarządzanie sesjami
+// =============================================
+
+ipcMain.handle('get-storage-state-path', async (event, accountId) => {
+  return automationManager.getStorageStatePath(accountId);
+});
+
+ipcMain.handle('check-cookie-refresh-needed', async (event, accountId) => {
+  return automationManager.checkCookieRefreshNeeded(accountId);
+});
+
+ipcMain.handle('refresh-account-cookies', async (event, { accountId, account }) => {
+  return await automationManager.refreshAccountCookies(accountId, account);
+});
+
+ipcMain.handle('get-accounts-needing-refresh', async () => {
+  return automationManager.getAccountsNeedingRefresh();
+});
+
+// =============================================
+// CONCURRENT ACCOUNTS LIMIT HANDLERS
+// =============================================
+
+ipcMain.handle('set-max-concurrent-accounts', async (event, maxAccounts) => {
+  automationManager.maxConcurrentAccounts = Math.min(Math.max(1, maxAccounts), 10);
+  return { success: true, maxConcurrentAccounts: automationManager.maxConcurrentAccounts };
+});
+
+ipcMain.handle('get-max-concurrent-accounts', async () => {
+  return automationManager.maxConcurrentAccounts;
+});
+
+// =============================================
+// SCREENSHOTS DIRECTORY
+// =============================================
+
+ipcMain.handle('get-screenshots-dir', async () => {
+  return automationManager.screenshotsDir;
+});
+
+ipcMain.handle('list-error-screenshots', async () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  try {
+    const files = fs.readdirSync(automationManager.screenshotsDir);
+    return files
+      .filter(f => f.endsWith('.png'))
+      .map(f => ({
+        name: f,
+        path: path.join(automationManager.screenshotsDir, f),
+        timestamp: fs.statSync(path.join(automationManager.screenshotsDir, f)).mtime
+      }))
+      .sort((a, b) => b.timestamp - a.timestamp);
+  } catch (error) {
+    return [];
+  }
+});
+
 function sendNotification(title, body) {
   if (Notification.isSupported()) {
     new Notification({ title, body }).show();

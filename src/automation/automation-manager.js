@@ -25,7 +25,7 @@ const {
   postPublishEngagement,
   performHumanError,
 } = require('../utils/human-behavior');
-const ProxyManager = require('../utils/proxy-manager');
+const { ProxyManager, STICKY_SESSION_CONFIG } = require('../utils/proxy-manager');
 const { FingerprintManager } = require('../utils/fingerprint-manager');
 const { ActivityLimiter, LIMITS } = require('../utils/activity-limiter');
 
@@ -51,6 +51,60 @@ class AutomationManager extends EventEmitter {
 
     // Proxy management - obsługa wielu proxy
     this.proxyList = store.get('proxyList', []);
+
+    // Storage state paths (dla storageState zamiast addCookies)
+    this.storageStatePath = null;
+
+    // Cookie refresh tracking
+    this.cookieRefreshConfig = {
+      refreshIntervalDays: 5, // 3-7 dni
+      minRefreshDays: 3,
+      maxRefreshDays: 7,
+    };
+
+    // Screenshot on errors
+    this.screenshotsDir = require('path').join(
+      require('os').homedir(),
+      '.automatyzator-grup',
+      'screenshots'
+    );
+    this.ensureScreenshotsDir();
+
+    // Concurrent accounts limit
+    this.maxConcurrentAccounts = 5;
+    this.activeAccountTasks = new Map(); // accountId -> Promise
+  }
+
+  /**
+   * Tworzy folder na screenshoty jeśli nie istnieje
+   */
+  ensureScreenshotsDir() {
+    const fs = require('fs');
+    if (!fs.existsSync(this.screenshotsDir)) {
+      fs.mkdirSync(this.screenshotsDir, { recursive: true });
+    }
+  }
+
+  /**
+   * Zapisuje screenshot błędu
+   * @param {Page} page - Playwright page
+   * @param {string} errorType - Typ błędu
+   * @param {string} accountId - ID konta (opcjonalne)
+   * @returns {string} Ścieżka do screenshota
+   */
+  async captureErrorScreenshot(page, errorType, accountId = 'unknown') {
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `error_${errorType}_${accountId}_${timestamp}.png`;
+      const filepath = require('path').join(this.screenshotsDir, filename);
+
+      await page.screenshot({ path: filepath, fullPage: true });
+      this.addLog(`📸 Screenshot zapisany: ${filename}`, 'info');
+      return filepath;
+    } catch (err) {
+      this.addLog(`⚠️ Nie udało się zapisać screenshota: ${err.message}`, 'warning');
+      return null;
+    }
   }
 
   // =============================================
@@ -243,6 +297,245 @@ class AutomationManager extends EventEmitter {
     }
 
     return { validAccounts, invalidAccounts };
+  }
+
+  // =============================================
+  // STORAGE STATE - lepsza persystencja sesji
+  // =============================================
+
+  /**
+   * Zapisuje stan sesji używając storageState (zamiast addCookies)
+   * @param {BrowserContext} context - Playwright context
+   * @param {string} accountId - ID konta
+   * @returns {string} Ścieżka do pliku stanu
+   */
+  async saveStorageState(context, accountId) {
+    const fs = require('fs');
+    const path = require('path');
+
+    const stateDir = path.join(
+      require('os').homedir(),
+      '.automatyzator-grup',
+      'storage-states'
+    );
+
+    if (!fs.existsSync(stateDir)) {
+      fs.mkdirSync(stateDir, { recursive: true });
+    }
+
+    const statePath = path.join(stateDir, `account_${accountId}_state.json`);
+
+    // Playwright: storageState() zapisuje cookies + localStorage + sessionStorage
+    await context.storageState({ path: statePath });
+
+    // Zapisz timestamp ostatniego odświeżenia
+    const metaPath = path.join(stateDir, `account_${accountId}_meta.json`);
+    const meta = {
+      accountId,
+      lastSaved: new Date().toISOString(),
+      lastRefresh: new Date().toISOString(),
+      statePath
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+
+    this.addLog(`💾 StorageState zapisany dla konta ${accountId}`, 'success');
+    return statePath;
+  }
+
+  /**
+   * Ładuje stan sesji z pliku storageState
+   * @param {string} accountId - ID konta
+   * @returns {string|null} Ścieżka do pliku stanu lub null
+   */
+  getStorageStatePath(accountId) {
+    const fs = require('fs');
+    const path = require('path');
+
+    const stateDir = path.join(
+      require('os').homedir(),
+      '.automatyzator-grup',
+      'storage-states'
+    );
+
+    const statePath = path.join(stateDir, `account_${accountId}_state.json`);
+
+    if (fs.existsSync(statePath)) {
+      return statePath;
+    }
+    return null;
+  }
+
+  /**
+   * Tworzy context z zapisanym storageState
+   * @param {Browser} browser - Playwright browser
+   * @param {string} accountId - ID konta
+   * @param {Object} options - Dodatkowe opcje context
+   * @returns {BrowserContext}
+   */
+  async createContextWithStorageState(browser, accountId, options = {}) {
+    const statePath = this.getStorageStatePath(accountId);
+
+    const contextOptions = {
+      ...options,
+    };
+
+    if (statePath) {
+      contextOptions.storageState = statePath;
+      this.addLog(`📂 Ładuję storageState dla konta ${accountId}`, 'info');
+    }
+
+    return await browser.newContext(contextOptions);
+  }
+
+  // =============================================
+  // COOKIE REFRESH - automatyczne odświeżanie
+  // =============================================
+
+  /**
+   * Sprawdza czy cookies wymagają odświeżenia
+   * @param {string} accountId - ID konta
+   * @returns {Object} { needsRefresh: boolean, daysSinceRefresh: number }
+   */
+  checkCookieRefreshNeeded(accountId) {
+    const fs = require('fs');
+    const path = require('path');
+
+    const stateDir = path.join(
+      require('os').homedir(),
+      '.automatyzator-grup',
+      'storage-states'
+    );
+
+    const metaPath = path.join(stateDir, `account_${accountId}_meta.json`);
+
+    if (!fs.existsSync(metaPath)) {
+      return { needsRefresh: true, daysSinceRefresh: Infinity, reason: 'Brak zapisanego stanu' };
+    }
+
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      const lastRefresh = new Date(meta.lastRefresh);
+      const now = new Date();
+      const daysSinceRefresh = (now - lastRefresh) / (1000 * 60 * 60 * 24);
+
+      // Losowy próg między 3-7 dni
+      const refreshThreshold = this.cookieRefreshConfig.minRefreshDays +
+        Math.random() * (this.cookieRefreshConfig.maxRefreshDays - this.cookieRefreshConfig.minRefreshDays);
+
+      if (daysSinceRefresh >= refreshThreshold) {
+        return {
+          needsRefresh: true,
+          daysSinceRefresh: Math.round(daysSinceRefresh * 10) / 10,
+          reason: `Minęło ${Math.round(daysSinceRefresh)} dni od ostatniego odświeżenia (próg: ${Math.round(refreshThreshold)} dni)`
+        };
+      }
+
+      return {
+        needsRefresh: false,
+        daysSinceRefresh: Math.round(daysSinceRefresh * 10) / 10,
+        nextRefreshIn: Math.round((refreshThreshold - daysSinceRefresh) * 10) / 10
+      };
+
+    } catch (error) {
+      return { needsRefresh: true, daysSinceRefresh: Infinity, reason: 'Błąd odczytu metadanych' };
+    }
+  }
+
+  /**
+   * Odświeża cookies poprzez zalogowanie się i zapisanie nowego stanu
+   * @param {string} accountId - ID konta
+   * @param {Object} account - Dane konta (z cookies)
+   * @returns {boolean} Czy odświeżenie się powiodło
+   */
+  async refreshAccountCookies(accountId, account) {
+    this.addLog(`🔄 Odświeżam cookies dla konta ${accountId}...`, 'info');
+
+    const { chromium } = require('playwright');
+    let browser = null;
+    let context = null;
+
+    try {
+      browser = await chromium.launch({ headless: true });
+
+      // Użyj istniejącego storageState lub cookies
+      const statePath = this.getStorageStatePath(accountId);
+      const contextOptions = {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      };
+
+      if (statePath) {
+        contextOptions.storageState = statePath;
+      }
+
+      context = await browser.newContext(contextOptions);
+
+      // Jeśli brak storageState, załaduj cookies
+      if (!statePath && account.cookies) {
+        const cookieArray = typeof account.cookies === 'string' ? JSON.parse(account.cookies) : account.cookies;
+        const normalizedCookies = cookieArray.map(cookie => ({
+          name: cookie.name,
+          value: cookie.value,
+          domain: cookie.domain,
+          path: cookie.path || '/',
+          secure: cookie.secure || false,
+          httpOnly: cookie.httpOnly || false,
+          sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
+                   cookie.sameSite === 'lax' ? 'Lax' :
+                   cookie.sameSite === 'strict' ? 'Strict' : 'None',
+          expires: cookie.expirationDate ? cookie.expirationDate : undefined
+        }));
+        await context.addCookies(normalizedCookies);
+      }
+
+      const page = await context.newPage();
+
+      // Odwiedź Facebook żeby odświeżyć sesję
+      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 });
+      const currentUrl = page.url();
+
+      if (currentUrl.includes('login') || currentUrl.includes('checkpoint')) {
+        this.addLog(`❌ Sesja wygasła dla konta ${accountId} - wymagane ponowne logowanie`, 'error');
+        await context.close();
+        await browser.close();
+        return false;
+      }
+
+      // Zapisz nowy storageState
+      await this.saveStorageState(context, accountId);
+
+      this.addLog(`✅ Cookies odświeżone dla konta ${accountId}`, 'success');
+
+      await context.close();
+      await browser.close();
+      return true;
+
+    } catch (error) {
+      this.addLog(`❌ Błąd odświeżania cookies: ${error.message}`, 'error');
+      if (context) await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * Pobiera listę kont wymagających odświeżenia cookies
+   * @returns {Array} Lista kont z informacją o odświeżeniu
+   */
+  getAccountsNeedingRefresh() {
+    const accounts = this.store.get('facebookAccounts', []);
+    const needsRefresh = [];
+
+    for (const account of accounts) {
+      const refreshStatus = this.checkCookieRefreshNeeded(account.id);
+      if (refreshStatus.needsRefresh) {
+        needsRefresh.push({
+          account,
+          ...refreshStatus
+        });
+      }
+    }
+
+    return needsRefresh;
   }
 
   // =============================================
@@ -856,6 +1149,7 @@ class AutomationManager extends EventEmitter {
     this.addLog(`🚀 Rozpoczynam postowanie wielokontowe`, 'info');
     this.addLog(`📊 Konta do sprawdzenia: ${accounts.length}`, 'info');
     this.addLog(`📝 Posty: ${posts.length}`, 'info');
+    this.addLog(`⚙️ Max jednoczesnych kont: ${this.maxConcurrentAccounts}`, 'info');
 
     // =============================================
     // WALIDACJA COOKIES - przed rozpoczęciem
@@ -882,16 +1176,24 @@ class AutomationManager extends EventEmitter {
     this.addLog(`\n✅ Konta z ważnymi cookies: ${validAccounts.length}/${accounts.length}`, 'success');
 
     // =============================================
-    // PODZIAŁ POSTÓW między ważne konta
+    // ROUND-ROBIN: Rozdziel posty między konta
     // =============================================
-    const postsPerAccount = Math.ceil(posts.length / validAccounts.length);
-    const accountTasks = [];
+    this.addLog(`\n🔄 Rozdzielam posty metodą round-robin...`, 'info');
 
+    // Round-robin zamiast chunków - każde konto dostaje posty na przemian
+    const accountPostsMap = new Map();
+    validAccounts.forEach(acc => accountPostsMap.set(acc.id, []));
+
+    for (let i = 0; i < posts.length; i++) {
+      const accountIndex = i % validAccounts.length;
+      const account = validAccounts[accountIndex];
+      accountPostsMap.get(account.id).push(posts[i]);
+    }
+
+    const accountTasks = [];
     for (let i = 0; i < validAccounts.length; i++) {
       const account = validAccounts[i];
-      const startIndex = i * postsPerAccount;
-      const endIndex = Math.min(startIndex + postsPerAccount, posts.length);
-      const accountPosts = posts.slice(startIndex, endIndex);
+      const accountPosts = accountPostsMap.get(account.id);
 
       if (accountPosts.length > 0) {
         // Pobierz proxy przypisane do konta
@@ -910,31 +1212,79 @@ class AutomationManager extends EventEmitter {
         });
 
         const proxyInfo = accountProxy ? `🌐 ${accountProxy.name || accountProxy.host}` : '🔓 bez proxy';
-        this.addLog(`🔹 ${account.name || `Konto #${i + 1}`}: ${accountPosts.length} postów | ${proxyInfo}`, 'info');
+        this.addLog(`🔹 ${account.name || `Konto #${i + 1}`}: ${accountPosts.length} postów (round-robin) | ${proxyInfo}`, 'info');
       }
     }
 
     this.addLog(`\n✅ Podział zakończony, uruchamiam ${accountTasks.length} instancji...`, 'success');
 
-    // WAŻNE: Każde konto uruchamia się w osobnym procesie (nie współdzieli this)
-    const promises = accountTasks.map(task =>
-      this.runAccountTaskIsolated(task, delayBetweenPosts)
-    );
+    // =============================================
+    // MAX 5 KONT JEDNOCZEŚNIE - kontrola przepustowości
+    // =============================================
+    const results = [];
+    const errors = [];
+
+    // Funkcja do uruchamiania zadań z limitem
+    const runWithConcurrencyLimit = async (tasks, maxConcurrent) => {
+      const executing = new Set();
+
+      for (const task of tasks) {
+        // Czekaj jeśli osiągnięto limit
+        while (executing.size >= maxConcurrent) {
+          await Promise.race(executing);
+        }
+
+        const taskPromise = (async () => {
+          try {
+            this.addLog(`▶️ Uruchamiam konto ${task.accountName} (${executing.size + 1}/${maxConcurrent} aktywnych)`, 'info');
+            await this.runAccountTaskIsolated(task, delayBetweenPosts);
+            results.push({ accountId: task.accountId, success: true });
+          } catch (error) {
+            this.addLog(`❌ Błąd konta ${task.accountName}: ${error.message}`, 'error');
+            errors.push({ accountId: task.accountId, error: error.message });
+          }
+        })().finally(() => {
+          executing.delete(taskPromise);
+        });
+
+        executing.add(taskPromise);
+
+        // Delay między uruchamianiem kolejnych kont (30-120s)
+        if (executing.size < tasks.length) {
+          const delayMs = this.activityLimiter.getDelayBetweenAccounts();
+          const delaySec = Math.round(delayMs / 1000);
+          this.addLog(`⏳ Czekam ${delaySec}s przed następnym kontem...`, 'info');
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      }
+
+      // Czekaj na zakończenie wszystkich zadań
+      await Promise.all(executing);
+    };
 
     try {
-      await Promise.all(promises);
-      this.addLog(`\n🎉 Wszystkie konta zakończyły postowanie!`, 'success');
+      await runWithConcurrencyLimit(accountTasks, this.maxConcurrentAccounts);
+
+      const successCount = results.filter(r => r.success).length;
+      const errorCount = errors.length;
+
+      this.addLog(`\n🎉 Zakończono! Sukces: ${successCount}, Błędy: ${errorCount}`, 'success');
+
       return {
-        success: true,
+        success: errorCount === 0,
+        totalAccounts: accountTasks.length,
+        successfulAccounts: successCount,
+        failedAccounts: errorCount,
         validAccounts: validAccounts.length,
         invalidAccounts: invalidAccounts.length,
+        errors: errors,
         skippedAccounts: invalidAccounts.map(a => ({
           name: a.name || a.email,
           reason: a.validationError
         }))
       };
     } catch (error) {
-      this.addLog(`\n❌ Błąd w jednym z kont: ${error.message}`, 'error');
+      this.addLog(`\n❌ Krytyczny błąd: ${error.message}`, 'error');
       throw error;
     }
   }
@@ -1045,9 +1395,22 @@ class AutomationManager extends EventEmitter {
       }
       
       this.addLog(`[Konto #${accountIndex}] ✅ Zakończono postowanie (${posts.length} postów)`, 'success');
-      
+
+      // Zapisz storageState po udanym postowaniu
+      try {
+        await this.saveStorageState(context, task.accountId);
+      } catch (e) {
+        // Ignoruj błędy zapisu stanu
+      }
+
     } catch (error) {
       this.addLog(`[Konto #${accountIndex}] ❌ Błąd: ${error.message}`, 'error');
+
+      // 📸 SCREENSHOT NA BŁĘDZIE
+      if (page) {
+        await this.captureErrorScreenshot(page, 'task_error', task.accountId);
+      }
+
       throw error;
     } finally {
       await browser.close();
@@ -1342,9 +1705,13 @@ class AutomationManager extends EventEmitter {
       await randomDelay(3000, 4000);
       
       this.addLog(`[Konto #${accountIndex}] ✅ Post opublikowany pomyślnie!`, 'success');
-      
+
     } catch (error) {
       this.addLog(`[Konto #${accountIndex}] ❌ Błąd postowania: ${error.message}`, 'error');
+
+      // 📸 SCREENSHOT NA BŁĘDZIE
+      await this.captureErrorScreenshot(page, 'posting_error', `account${accountIndex}`);
+
       throw error;
     }
   }
@@ -2096,6 +2463,13 @@ class AutomationManager extends EventEmitter {
 
     } catch (error) {
       this.addLog(`❌ Błąd: ${error.message}`, 'error');
+
+      // 📸 SCREENSHOT NA BŁĘDZIE
+      if (this.page) {
+        const accountId = this.currentTask?.accountId || 'default';
+        await this.captureErrorScreenshot(this.page, 'postToGroup_error', accountId);
+      }
+
       throw error;
     }
   }
