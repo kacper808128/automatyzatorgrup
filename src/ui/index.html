@@ -76,109 +76,144 @@
                     </div>
                 </div>
 
-                <!-- Panel postowania -->
+                <!-- Panel postowania - PRZEBUDOWANY -->
                 <div class="tab-content" id="posting">
                     <h2>Automatyczne postowanie</h2>
+
+                    <!-- KROK 1: KONTA -->
                     <div class="card">
-                        <div class="form-group">
-                            <label>🔑 Konta Facebook (cookies)</label>
-                            <div id="accountsList" style="margin-bottom: 15px;">
-                                <div class="account-item" style="background: #1a1a1a; padding: 15px; border-radius: 5px; margin-bottom: 10px;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                        <strong style="color: #00ff88;">Konto #1</strong>
-                                        <button class="btn btn-danger btn-sm" onclick="removeAccount(0)" style="padding: 5px 10px; font-size: 12px;">
-                                            🗑️ Usuń
-                                        </button>
-                                    </div>
-                                    <textarea 
-                                        id="account-0-cookies" 
-                                        rows="4"
-                                        class="form-control"
-                                        style="font-size: 12px;"
-                                        placeholder='[{"name":"c_user","value":"xxx","domain":".facebook.com"}]'
-                                    ></textarea>
-                                </div>
+                        <h3 style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                            <span style="background: #00ff88; color: #000; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold;">1</span>
+                            Konta Facebook
+                        </h3>
+
+                        <div id="accountsList" style="margin-bottom: 15px;">
+                            <!-- Dynamicznie wypełniane -->
+                        </div>
+
+                        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                            <button class="btn btn-success" id="addAccountBtn" style="flex: 1;">
+                                ➕ Dodaj konto
+                            </button>
+                            <button class="btn btn-primary" id="saveAllAccountsBtn" style="flex: 1;">
+                                💾 Zapisz konta
+                            </button>
+                            <button class="btn btn-secondary" id="validateAllAccountsBtn" style="flex: 1;">
+                                🔍 Sprawdź cookies
+                            </button>
+                        </div>
+
+                        <div class="info-box" style="background: #1a2a3a; border: 1px solid #3498db;">
+                            <strong>ℹ️ Jak to działa:</strong>
+                            <ul style="margin: 10px 0 0 20px; color: #aaa;">
+                                <li>Posty są rozdzielane równomiernie (round-robin)</li>
+                                <li>Maksymalnie 5 kont pracuje jednocześnie</li>
+                                <li>Każde konto = osobna przeglądarka</li>
+                                <li>Nieważne cookies = konto pomijane</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- KROK 2: POSTY -->
+                    <div class="card">
+                        <h3 style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                            <span style="background: #3498db; color: #fff; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold;">2</span>
+                            Posty do opublikowania
+                        </h3>
+
+                        <!-- Zakładki: CSV vs Ręcznie -->
+                        <div style="display: flex; gap: 5px; margin-bottom: 15px;">
+                            <button class="btn btn-primary posting-source-tab active" data-source="csv" style="flex: 1;">
+                                📂 Z pliku CSV
+                            </button>
+                            <button class="btn btn-secondary posting-source-tab" data-source="manual" style="flex: 1;">
+                                ✏️ Ręcznie
+                            </button>
+                        </div>
+
+                        <!-- Źródło: CSV -->
+                        <div id="postingSourceCsv">
+                            <div class="form-group">
+                                <input
+                                    type="file"
+                                    id="csvFileInput"
+                                    accept=".csv"
+                                    class="form-control"
+                                    style="padding: 15px; background: #1a1a1a; border: 2px dashed #444; cursor: pointer;"
+                                >
+                                <small class="text-muted">
+                                    Kolumny: <strong>group_link</strong> (link do grupy), <strong>post_copy</strong> (treść posta)
+                                </small>
                             </div>
-                            
-                            <button class="btn btn-success" id="addAccountBtn" style="width: 100%; margin-bottom: 10px;">
-                                ➕ Dodaj kolejne konto
+
+                            <button class="btn btn-success" id="loadCsvBtn" style="width: 100%;">
+                                📥 Załaduj plik CSV
                             </button>
-                            
-                            <button class="btn btn-primary" id="saveAllAccountsBtn" style="width: 100%;">
-                                💾 Zapisz wszystkie konta
-                            </button>
-                            
-                            <small class="text-muted" style="display: block; margin-top: 10px;">
-                                ⚡ Posty zostaną równomiernie rozdzielone między wszystkie konta<br>
-                                🚀 Każde konto uruchomi się w osobnej instancji przeglądarki<br>
-                                📊 Przy 3 kontach i 9 postach: każde konto dostanie 3 posty
-                            </small>
+
+                            <div id="csvPreview" style="display: none; margin-top: 15px; padding: 15px; background: #1a3a1a; border-radius: 5px;">
+                                <h4 style="color: #00ff88; margin-bottom: 10px;">✅ CSV załadowany</h4>
+                                <p id="csvStats" style="color: #ccc; margin: 0;"></p>
+                            </div>
                         </div>
 
-                        <hr style="margin: 20px 0; border: 1px solid #333;">
+                        <!-- Źródło: Ręcznie (ukryte domyślnie) -->
+                        <div id="postingSourceManual" style="display: none;">
+                            <div class="form-group">
+                                <label for="postMessage">Treść posta:</label>
+                                <textarea id="postMessage" rows="5" placeholder="Wpisz treść swojego posta..."></textarea>
+                            </div>
 
-                        <div class="form-group">
-                            <label>📂 Import z CSV</label>
-                            <input 
-                                type="file" 
-                                id="csvFileInput" 
-                                accept=".csv"
-                                class="form-control"
-                                style="padding: 10px; background: #1a1a1a; border: 2px dashed #444; cursor: pointer;"
-                            >
-                            <small class="text-muted">
-                                Format CSV: group_link, post_copy, group_name, group_id, post_language, job_title, job_url, job_company, generated_at, ready_to_publish<br>
-                                Bot użyje kolumn: <strong>group_link</strong> (link do grupy) i <strong>post_copy</strong> (treść posta)
-                            </small>
-                            <button class="btn btn-success" id="loadCsvBtn" style="margin-top: 10px;">
-                                📥 Załaduj CSV
-                            </button>
+                            <div class="form-group">
+                                <label for="groupsList">Grupy Facebook (jeden URL na linię):</label>
+                                <textarea id="groupsList" rows="6" placeholder="https://www.facebook.com/groups/grupa1&#10;https://www.facebook.com/groups/grupa2"></textarea>
+                            </div>
                         </div>
+                    </div>
 
-                        <div id="csvPreview" style="display: none; margin-top: 20px; padding: 15px; background: #1a3a1a; border-radius: 5px;">
-                            <h4 style="color: #00ff88;">✅ CSV załadowany</h4>
-                            <p id="csvStats" style="color: #ccc;"></p>
-                        </div>
-
-                        <hr style="margin: 20px 0; border: 1px solid #333;">
-                        
-                        <div class="form-group">
-                            <label for="postMessage">LUB wpisz treść posta ręcznie:</label>
-                            <textarea id="postMessage" rows="6" placeholder="Wpisz treść swojego posta..."></textarea>
-                        </div>
-                        
-                        <div class="form-group">
-                            <label for="groupsList">Grupy Facebook (po jednym URL w linii):</label>
-                            <textarea id="groupsList" rows="8" placeholder="https://www.facebook.com/groups/grupa1&#10;https://www.facebook.com/groups/grupa2&#10;..."></textarea>
-                            <small>Wklej URL-e grup, każda grupa w nowej linii</small>
-                        </div>
+                    <!-- KROK 3: URUCHOM -->
+                    <div class="card">
+                        <h3 style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                            <span style="background: #e74c3c; color: #fff; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold;">3</span>
+                            Uruchom postowanie
+                        </h3>
 
                         <div class="form-group">
                             <label for="delayBetweenPosts">Opóźnienie między postami (sekundy):</label>
-                            <input type="number" id="delayBetweenPosts" value="60" min="30" max="600">
-                            <small>Rekomendowane: 60-120 sekund dla naturalnego zachowania</small>
+                            <input type="number" id="delayBetweenPosts" value="90" min="60" max="600">
+                            <small>Rekomendowane: 60-120s. System automatycznie dodaje losowe odchylenie ±30s.</small>
                         </div>
 
-                        <div class="control-panel">
-                            <button class="btn btn-success" id="startPostingBtn">
-                                ▶️ Rozpocznij postowanie
-                            </button>
-                            <button class="btn btn-warning" id="pausePostingBtn" disabled>
-                                ⏸️ Wstrzymaj
-                            </button>
-                            <button class="btn btn-info" id="resumePostingBtn" disabled>
-                                ▶️ Wznów
-                            </button>
-                            <button class="btn btn-danger" id="stopPostingBtn" disabled>
-                                ⏹️ Zatrzymaj
-                            </button>
-                        </div>
-
-                        <div class="progress-info" id="progressInfo" style="display: none;">
-                            <div class="progress-bar">
-                                <div class="progress-fill" id="progressFill"></div>
+                        <!-- Status przed uruchomieniem -->
+                        <div id="preStartStatus" style="background: #1a1a1a; padding: 15px; border-radius: 5px; margin-bottom: 15px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                                <span>Konta z ważnymi cookies:</span>
+                                <strong id="validAccountsCount" style="color: #00ff88;">0</strong>
                             </div>
-                            <p id="progressText">0 / 0 grup</p>
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                                <span>Postów do opublikowania:</span>
+                                <strong id="postsToPublishCount" style="color: #3498db;">0</strong>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span>Postów na konto:</span>
+                                <strong id="postsPerAccountCount" style="color: #f39c12;">-</strong>
+                            </div>
+                        </div>
+
+                        <div class="control-panel" style="display: flex; gap: 10px;">
+                            <button class="btn btn-success btn-large" id="startPostingBtn" style="flex: 2; padding: 15px; font-size: 16px;">
+                                ▶️ ROZPOCZNIJ POSTOWANIE
+                            </button>
+                            <button class="btn btn-danger" id="stopPostingBtn" disabled style="flex: 1; padding: 15px;">
+                                ⏹️ STOP
+                            </button>
+                        </div>
+
+                        <!-- Progress -->
+                        <div class="progress-info" id="progressInfo" style="display: none; margin-top: 15px;">
+                            <div class="progress-bar" style="height: 20px; background: #333; border-radius: 10px; overflow: hidden;">
+                                <div class="progress-fill" id="progressFill" style="height: 100%; background: linear-gradient(90deg, #00ff88, #3498db); transition: width 0.3s;"></div>
+                            </div>
+                            <p id="progressText" style="text-align: center; margin-top: 10px; color: #ccc;">0 / 0 postów</p>
                         </div>
                     </div>
                 </div>
