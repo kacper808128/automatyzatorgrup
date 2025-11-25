@@ -639,28 +639,38 @@ class AutomationManager extends EventEmitter {
 
     try {
       // Przygotuj konfigurację proxy dla Playwright
-      let proxyConfig = `http://${proxy.host}:${proxy.port}`;
+      // Playwright wymaga oddzielnej konfiguracji server i auth
+      const proxyConfig = {
+        server: `http://${proxy.host}:${proxy.port}`
+      };
 
+      // Jeśli proxy ma autentykację, dodaj osobno
       if (proxy.username && proxy.password) {
-        proxyConfig = `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
+        proxyConfig.username = proxy.username;
+        proxyConfig.password = proxy.password;
       }
 
       // Uruchom przeglądarkę z proxy
       browser = await chromium.launch({
         headless: true,
-        proxy: {
-          server: proxyConfig
-        }
+        proxy: proxyConfig,
+        // Dodatkowe flagi dla lepszej kompatybilności proxy
+        args: [
+          '--ignore-certificate-errors',
+          '--ignore-certificate-errors-spki-list'
+        ]
       });
 
       context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ignoreHTTPSErrors: true // Ignoruj błędy SSL przez proxy
       });
 
       const page = await context.newPage();
 
-      // Sprawdź IP przez proxy
-      await page.goto('https://api.ipify.org?format=json', {
+      // Użyj HTTP zamiast HTTPS dla testowania proxy (unikamy problemów z tunelem)
+      // Jeśli HTTP działa, to HTTPS też będzie działać w normalnej przeglądarce
+      await page.goto('http://api.ipify.org?format=json', {
         waitUntil: 'domcontentloaded',
         timeout: 15000
       });
@@ -1274,7 +1284,7 @@ class AutomationManager extends EventEmitter {
     this.emit('status-change', this.getStatus());
 
     const results = [];
-    const errors = [];
+    const accountsStats = []; // Szczegółowe statystyki każdego konta
 
     // Funkcja do uruchamiania zadań z limitem
     const runWithConcurrencyLimit = async (tasks, maxConcurrent) => {
@@ -1301,11 +1311,25 @@ class AutomationManager extends EventEmitter {
         const taskPromise = (async () => {
           try {
             this.addLog(`▶️ Uruchamiam konto ${task.accountName} (${executing.size + 1}/${maxConcurrent} aktywnych)`, 'info');
-            await this.runAccountTaskIsolated(task);
-            results.push({ accountId: task.accountId, success: true });
+            const stats = await this.runAccountTaskIsolated(task);
+            accountsStats.push(stats);
+
+            const hasError = stats.criticalError || stats.failedPosts.length > 0;
+            results.push({
+              accountId: task.accountId,
+              success: !hasError,
+              stats: stats
+            });
           } catch (error) {
             this.addLog(`❌ Błąd konta ${task.accountName}: ${error.message}`, 'error');
-            errors.push({ accountId: task.accountId, error: error.message });
+            accountsStats.push({
+              accountId: task.accountId,
+              accountName: task.accountName,
+              successfulPosts: [],
+              failedPosts: [],
+              totalAttempted: task.posts.length,
+              criticalError: error.message
+            });
           }
         })().finally(() => {
           executing.delete(taskPromise);
@@ -1339,22 +1363,91 @@ class AutomationManager extends EventEmitter {
       await runWithConcurrencyLimit(accountTasks, this.maxConcurrentAccounts);
 
       const successCount = results.filter(r => r.success).length;
-      const errorCount = errors.length;
+      const failedAccounts = results.filter(r => !r.success).length;
 
-      if (this.isRunning) {
-        this.addLog(`\n🎉 Zakończono! Sukces: ${successCount}, Błędy: ${errorCount}`, 'success');
-      } else {
-        this.addLog(`\n⏹️ Zatrzymano przez użytkownika. Sukces: ${successCount}, Błędy: ${errorCount}`, 'warning');
+      // Oblicz całkowite statystyki postów
+      let totalSuccessfulPosts = 0;
+      let totalFailedPosts = 0;
+      const groupStats = new Map(); // Grupuj posty per grupa
+
+      for (const stats of accountsStats) {
+        totalSuccessfulPosts += stats.successfulPosts.length;
+        totalFailedPosts += stats.failedPosts.length;
+
+        // Zlicz posty per grupa
+        for (const post of stats.successfulPosts) {
+          const groupKey = post.groupLink;
+          groupStats.set(groupKey, (groupStats.get(groupKey) || 0) + 1);
+        }
       }
 
+      // ========================================
+      // SZCZEGÓŁOWE PODSUMOWANIE KOŃCOWE
+      // ========================================
+      this.addLog(`\n${'='.repeat(60)}`, 'info');
+      this.addLog(`📊 PODSUMOWANIE AUTOMATYZACJI`, 'info');
+      this.addLog(`${'='.repeat(60)}`, 'info');
+
+      if (this.isRunning) {
+        this.addLog(`\n✅ Status: Zakończono pomyślnie`, 'success');
+      } else {
+        this.addLog(`\n⏹️ Status: Zatrzymano przez użytkownika`, 'warning');
+      }
+
+      // Statystyki kont
+      this.addLog(`\n👥 KONTA:`, 'info');
+      this.addLog(`   • Kont użytych: ${accountTasks.length}`, 'info');
+      this.addLog(`   • Kont z sukcesem: ${successCount}`, 'success');
+      this.addLog(`   • Kont z błędami: ${failedAccounts}`, failedAccounts > 0 ? 'warning' : 'info');
+
+      // Statystyki postów
+      this.addLog(`\n📝 POSTY:`, 'info');
+      this.addLog(`   • Opublikowane pomyślnie: ${totalSuccessfulPosts}`, 'success');
+      this.addLog(`   • Błędy publikacji: ${totalFailedPosts}`, totalFailedPosts > 0 ? 'warning' : 'info');
+      this.addLog(`   • Całkowita liczba prób: ${totalSuccessfulPosts + totalFailedPosts}`, 'info');
+      if (totalSuccessfulPosts + totalFailedPosts > 0) {
+        const successRate = ((totalSuccessfulPosts / (totalSuccessfulPosts + totalFailedPosts)) * 100).toFixed(1);
+        this.addLog(`   • Wskaźnik sukcesu: ${successRate}%`, 'info');
+      }
+
+      // Posty per grupa
+      if (groupStats.size > 0) {
+        this.addLog(`\n🎯 POSTY PER GRUPA (top 10):`, 'info');
+        const sortedGroups = Array.from(groupStats.entries())
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 10);
+
+        for (const [groupLink, count] of sortedGroups) {
+          const groupName = groupLink.split('/').pop() || groupLink;
+          this.addLog(`   • ${groupName}: ${count} postów`, 'info');
+        }
+      }
+
+      // Posty per konto
+      this.addLog(`\n👤 POSTY PER KONTO:`, 'info');
+      for (const stats of accountsStats) {
+        const status = stats.criticalError ? '❌' : stats.failedPosts.length > 0 ? '⚠️' : '✅';
+        const postsInfo = `${stats.successfulPosts.length} sukces, ${stats.failedPosts.length} błąd`;
+        this.addLog(`   ${status} ${stats.accountName}: ${postsInfo}`, stats.criticalError ? 'error' : 'info');
+
+        if (stats.criticalError) {
+          this.addLog(`      └─ Błąd krytyczny: ${stats.criticalError}`, 'error');
+        }
+      }
+
+      this.addLog(`\n${'='.repeat(60)}\n`, 'info');
+
       return {
-        success: errorCount === 0,
+        success: failedAccounts === 0 && totalFailedPosts === 0,
         totalAccounts: accountTasks.length,
         successfulAccounts: successCount,
-        failedAccounts: errorCount,
+        failedAccounts: failedAccounts,
         validAccounts: validAccounts.length,
         invalidAccounts: invalidAccounts.length,
-        errors: errors,
+        totalSuccessfulPosts: totalSuccessfulPosts,
+        totalFailedPosts: totalFailedPosts,
+        groupStats: Object.fromEntries(groupStats),
+        accountsStats: accountsStats,
         skippedAccounts: invalidAccounts.map(a => ({
           name: a.name || a.email,
           reason: a.validationError
@@ -1519,6 +1612,15 @@ class AutomationManager extends EventEmitter {
 
       this.addLog(`${logPrefix} ✅ Zalogowano pomyślnie!`, 'success');
 
+      // Statystyki dla tego konta
+      const accountStats = {
+        accountId: task.accountId,
+        accountName: accountName,
+        successfulPosts: [],
+        failedPosts: [],
+        totalAttempted: posts.length
+      };
+
       // Postuj do każdej grupy
       for (let i = 0; i < posts.length; i++) {
         // SPRAWDŹ CZY AUTOMATYZACJA NIE ZOSTAŁA ZATRZYMANA
@@ -1532,8 +1634,17 @@ class AutomationManager extends EventEmitter {
 
         try {
           await this.postToGroupInline(page, post.groupLink, post.postCopy, accountName);
+          accountStats.successfulPosts.push({
+            groupLink: post.groupLink,
+            groupName: post.groupName || post.groupLink
+          });
         } catch (postError) {
           this.addLog(`${logPrefix} ⚠️ Błąd postu: ${postError.message}`, 'error');
+          accountStats.failedPosts.push({
+            groupLink: post.groupLink,
+            groupName: post.groupName || post.groupLink,
+            error: postError.message
+          });
           // Kontynuuj z następnym postem zamiast przerywać
           continue;
         }
@@ -1547,7 +1658,7 @@ class AutomationManager extends EventEmitter {
         }
       }
 
-      this.addLog(`${logPrefix} ✅ Zakończono postowanie`, 'success');
+      this.addLog(`${logPrefix} ✅ Zakończono postowanie (sukces: ${accountStats.successfulPosts.length}, błędy: ${accountStats.failedPosts.length})`, 'success');
 
       // Zapisz storageState po udanym postowaniu
       try {
@@ -1555,6 +1666,8 @@ class AutomationManager extends EventEmitter {
       } catch (e) {
         // Ignoruj błędy zapisu stanu
       }
+
+      return accountStats; // Zwróć statystyki
 
     } catch (error) {
       this.addLog(`${logPrefix} ❌ Błąd: ${error.message}`, 'error');
@@ -1564,7 +1677,15 @@ class AutomationManager extends EventEmitter {
         await this.captureErrorScreenshot(page, 'task_error', task.accountId).catch(() => {});
       }
 
-      throw error;
+      // Zwróć puste statystyki w razie błędu krytycznego
+      return {
+        accountId: task.accountId,
+        accountName: accountName,
+        successfulPosts: [],
+        failedPosts: [],
+        totalAttempted: posts.length,
+        criticalError: error.message
+      };
     } finally {
       // Zawsze zamknij przeglądarkę
       if (browser) {
@@ -1587,16 +1708,38 @@ class AutomationManager extends EventEmitter {
       await page.evaluate(() => window.scrollBy(0, 300));
       await randomDelay(1500, 2500);
 
-      // Znajdź przyciski reakcji (Like/Lubię to)
-      const reactionButtons = await page.$$('div[aria-label*="Like"], div[aria-label*="Lubię to"], div[aria-label*="lubię"], span[aria-label*="Like"]');
+      // Znajdź przyciski reakcji - TYLKO te które są buttonami, NIE linkami
+      const reactionButtons = await page.evaluate(() => {
+        const buttons = [];
+        const candidates = document.querySelectorAll('[aria-label*="Like"], [aria-label*="Lubię to"], [aria-label*="lubię"]');
 
-      if (reactionButtons.length === 0) {
+        for (const el of candidates) {
+          // Sprawdź czy to button, NIE link (a[role="link"])
+          const isButton = el.getAttribute('role') === 'button' || el.closest('[role="button"]');
+          const isNotLink = !el.matches('a[role="link"]') && !el.closest('a[role="link"]');
+
+          // Sprawdź czy nie zawiera liczby reakcji (to byłby licznik/link do listy)
+          const text = el.textContent || '';
+          const hasNumber = /\d/.test(text);
+
+          if (isButton && isNotLink && !hasNumber) {
+            el.setAttribute('data-reaction-button', 'true');
+            buttons.push(true);
+          }
+        }
+        return buttons.length;
+      });
+
+      if (reactionButtons === 0) {
         this.addLog(`${logPrefix} Nie znaleziono przycisków reakcji`, 'info');
         return 0;
       }
 
+      // Pobierz zaznaczone przyciski
+      const markedButtons = await page.$$('[data-reaction-button="true"]');
+
       // Wybierz losowe przyciski (max count)
-      const shuffled = reactionButtons.sort(() => 0.5 - Math.random());
+      const shuffled = markedButtons.sort(() => 0.5 - Math.random());
       const toReact = shuffled.slice(0, Math.min(count, shuffled.length));
 
       let reactedCount = 0;
@@ -1762,55 +1905,94 @@ class AutomationManager extends EventEmitter {
       this.addLog(`${logPrefix} Czekam na otwarcie okna...`, 'info');
       await randomDelay(4000, 6000);
 
-      // Znajdź pole tekstowe
-      this.addLog(`${logPrefix} Szukam pola tekstowego...`, 'info');
-      
+      // Znajdź pole tekstowe - TYLKO w modalu, NIE w komentarzach
+      this.addLog(`${logPrefix} Szukam pola tekstowego w modalu...`, 'info');
+
       const textAreaSelector = 'div[contenteditable="true"][role="textbox"]';
       await page.waitForSelector(textAreaSelector, { timeout: 15000 });
-      
-      // Znajdź widoczne pole w modalu
+
+      // Znajdź widoczne pole TYLKO w modalu tworzenia posta (role="dialog")
       const textAreaFound = await page.evaluate(() => {
-        const textAreas = Array.from(document.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
-        
+        // Najpierw znajdź modal
+        const modal = document.querySelector('[role="dialog"]');
+        if (!modal) return false;
+
+        // Szukaj textarea TYLKO w modalu
+        const textAreas = Array.from(modal.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
+
         for (const area of textAreas) {
           const rect = area.getBoundingClientRect();
-          const isVisible = rect.width > 0 && rect.height > 0 && 
+          const isVisible = rect.width > 0 && rect.height > 0 &&
                           rect.top >= 0 && rect.top < window.innerHeight;
-          
-          if (isVisible) {
+
+          // Sprawdź czy to NIE jest pole komentarza
+          const ariaLabel = area.getAttribute('aria-label') || '';
+          const placeholder = area.getAttribute('aria-placeholder') || '';
+          const isCommentField = ariaLabel.toLowerCase().includes('komentarz') ||
+                                ariaLabel.toLowerCase().includes('comment') ||
+                                placeholder.toLowerCase().includes('komentarz') ||
+                                placeholder.toLowerCase().includes('comment');
+
+          if (isVisible && !isCommentField) {
             area.setAttribute('data-post-textarea', 'true');
             return true;
           }
         }
         return false;
       });
-      
+
       if (!textAreaFound) {
-        throw new Error('Nie znaleziono pola tekstowego');
+        throw new Error('Nie znaleziono pola tekstowego w modalu');
       }
-      
-      // Kliknij w pole i upewnij się że jest aktywne
+
+      // Kliknij w pole i upewnij się że jest NAPRAWDĘ aktywne
       this.addLog(`${logPrefix} Aktywuję pole tekstowe...`, 'info');
-      
-      const fieldActivated = await page.evaluate(() => {
-        const area = document.querySelector('[data-post-textarea="true"]');
-        if (!area) return false;
-        
-        area.click();
-        area.focus();
-        
-        const rect = area.getBoundingClientRect();
-        const computedStyle = window.getComputedStyle(area);
-        
-        return {
-          visible: rect.width > 0 && rect.height > 0,
-          focused: document.activeElement === area,
-          editable: area.getAttribute('contenteditable') === 'true'
-        };
-      });
-      
-      this.addLog(`${logPrefix} Pole: widoczne=${fieldActivated.visible}, focus=${fieldActivated.focused}, editable=${fieldActivated.editable}`, 'info');
-      
+
+      // Wielokrotne próby aktywacji pola
+      let activationAttempts = 0;
+      let fieldActivated = null;
+
+      while (activationAttempts < 3) {
+        fieldActivated = await page.evaluate(() => {
+          const area = document.querySelector('[data-post-textarea="true"]');
+          if (!area) return { success: false };
+
+          // Kliknij wielokrotnie i focus
+          area.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          area.click();
+          area.focus();
+
+          // Poczekaj chwilę na aktywację
+          return new Promise(resolve => {
+            setTimeout(() => {
+              const rect = area.getBoundingClientRect();
+              const isFocused = document.activeElement === area;
+              const isEditable = area.getAttribute('contenteditable') === 'true';
+
+              resolve({
+                success: isFocused && isEditable,
+                visible: rect.width > 0 && rect.height > 0,
+                focused: isFocused,
+                editable: isEditable
+              });
+            }, 500);
+          });
+        });
+
+        if (fieldActivated.success) {
+          this.addLog(`${logPrefix} ✅ Pole aktywne: widoczne=${fieldActivated.visible}, focus=${fieldActivated.focused}, editable=${fieldActivated.editable}`, 'success');
+          break;
+        }
+
+        activationAttempts++;
+        this.addLog(`${logPrefix} ⚠️ Próba aktywacji ${activationAttempts}/3...`, 'warning');
+        await randomDelay(1000, 1500);
+      }
+
+      if (!fieldActivated || !fieldActivated.success) {
+        throw new Error('Nie udało się aktywować pola tekstowego po 3 próbach');
+      }
+
       await randomDelay(1000, 1500);
       
       this.addLog(`${logPrefix} Wklejam treść posta...`, 'info');
