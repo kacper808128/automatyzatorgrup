@@ -1972,64 +1972,76 @@ class AutomationManager extends EventEmitter {
       // Znajdź pole tekstowe - TYLKO w modalu, NIE w komentarzach
       this.addLog(`${logPrefix} Szukam pola tekstowego w modalu...`, 'info');
 
-      // Najpierw poczekaj aż modal się pojawi
-      await page.waitForSelector('[role="dialog"]', { timeout: 15000 });
-      this.addLog(`${logPrefix} ✅ Modal znaleziony, czekam na pole tekstowe...`, 'info');
+      // Facebook ma wiele modali [role="dialog"] jednocześnie (cookies, powiadomienia, etc)
+      // NIE możemy użyć waitForSelector('[role="dialog"]') bo czeka na PIERWSZY
+      // Musimy przeszukać WSZYSTKIE modale i znaleźć ten z polem tekstowym
 
-      // Poczekaj aż pole textarea pojawi się W MODALU (może się ładować z opóźnieniem)
+      // Poczekaj aż pole textarea pojawi się W JAKIMKOLWIEK widocznym modalu
       // Facebook ładuje pole tekstowe dynamicznie - używamy retry logic
       let textAreaFound = { found: false };
       let attempts = 0;
-      const maxAttempts = 10; // 10 prób x 1 sekunda = 10 sekund
+      const maxAttempts = 15; // 15 prób x 1 sekunda = 15 sekund
 
       while (!textAreaFound.found && attempts < maxAttempts) {
-        await randomDelay(1000, 1500);
+        await randomDelay(1000, 1200);
         attempts++;
 
         textAreaFound = await page.evaluate((attemptNum) => {
-          // Najpierw znajdź modal
-          const modal = document.querySelector('[role="dialog"]');
-          if (!modal) {
-            console.log('DEBUG: Brak modalu [role="dialog"]');
-            return { found: false, reason: 'Brak modalu [role="dialog"]' };
+          // Znajdź WSZYSTKIE modale (może być 3+ jednocześnie!)
+          const modals = Array.from(document.querySelectorAll('[role="dialog"]'));
+          console.log(`DEBUG: Próba ${attemptNum}: Znaleziono ${modals.length} modali na stronie`);
+
+          if (modals.length === 0) {
+            return { found: false, reason: 'Brak modali [role="dialog"]' };
           }
 
-          // Szukaj textarea TYLKO w modalu
-          const textAreas = Array.from(modal.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
-          console.log(`DEBUG: Próba ${attemptNum}: Znaleziono ${textAreas.length} pól textarea w modalu`);
+          // Przeszukaj KAŻDY modal szukając pola tekstowego
+          for (let modalIndex = 0; modalIndex < modals.length; modalIndex++) {
+            const modal = modals[modalIndex];
 
-          if (textAreas.length === 0) {
-            return { found: false, reason: `Brak pól textarea w modalu` };
-          }
+            // Sprawdź czy modal jest widoczny
+            const modalRect = modal.getBoundingClientRect();
+            const isModalVisible = modalRect.width > 0 && modalRect.height > 0;
 
-          for (let i = 0; i < textAreas.length; i++) {
-            const area = textAreas[i];
-            const rect = area.getBoundingClientRect();
-            const isVisible = rect.width > 0 && rect.height > 0 &&
-                            rect.top >= 0 && rect.top < window.innerHeight;
+            console.log(`DEBUG: Modal ${modalIndex}: visible=${isModalVisible}`);
 
-            // Sprawdź czy to NIE jest pole komentarza
-            const ariaLabel = area.getAttribute('aria-label') || '';
-            const placeholder = area.getAttribute('aria-placeholder') || '';
-            const isCommentField = ariaLabel.toLowerCase().includes('komentarz') ||
-                                  ariaLabel.toLowerCase().includes('comment') ||
-                                  placeholder.toLowerCase().includes('komentarz') ||
-                                  placeholder.toLowerCase().includes('comment');
+            if (!isModalVisible) continue;
 
-            console.log(`DEBUG: Pole ${i}: visible=${isVisible}, isComment=${isCommentField}, label="${ariaLabel}", placeholder="${placeholder}"`);
+            // Szukaj textarea W TYM modalu
+            const textAreas = Array.from(modal.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
+            console.log(`DEBUG: Modal ${modalIndex}: ${textAreas.length} pól textarea`);
 
-            if (isVisible && !isCommentField) {
-              area.setAttribute('data-post-textarea', 'true');
-              return { found: true };
+            for (let i = 0; i < textAreas.length; i++) {
+              const area = textAreas[i];
+              const rect = area.getBoundingClientRect();
+              const isVisible = rect.width > 0 && rect.height > 0 &&
+                              rect.top >= 0 && rect.top < window.innerHeight;
+
+              // Sprawdź czy to NIE jest pole komentarza
+              const ariaLabel = area.getAttribute('aria-label') || '';
+              const placeholder = area.getAttribute('aria-placeholder') || '';
+              const isCommentField = ariaLabel.toLowerCase().includes('komentarz') ||
+                                    ariaLabel.toLowerCase().includes('comment') ||
+                                    placeholder.toLowerCase().includes('komentarz') ||
+                                    placeholder.toLowerCase().includes('comment');
+
+              console.log(`DEBUG: Modal ${modalIndex}, Pole ${i}: visible=${isVisible}, isComment=${isCommentField}, label="${ariaLabel}"`);
+
+              if (isVisible && !isCommentField) {
+                area.setAttribute('data-post-textarea', 'true');
+                console.log(`DEBUG: ✅ Znaleziono pole w modalu ${modalIndex}`);
+                return { found: true, modalIndex: modalIndex };
+              }
             }
           }
-          return { found: false, reason: 'Wszystkie pola są niewidoczne lub są polami komentarzy' };
+
+          return { found: false, reason: `Sprawdzono ${modals.length} modali - brak widocznego pola tekstowego` };
         }, attempts).catch(err => {
           return { found: false, reason: `Błąd evaluate: ${err.message}` };
         });
 
         if (textAreaFound.found) {
-          this.addLog(`${logPrefix} ✅ Pole tekstowe znalezione po ${attempts} próbach`, 'success');
+          this.addLog(`${logPrefix} ✅ Pole tekstowe znalezione po ${attempts} próbach (modal #${textAreaFound.modalIndex || 0})`, 'success');
           break;
         }
       }
