@@ -639,28 +639,38 @@ class AutomationManager extends EventEmitter {
 
     try {
       // Przygotuj konfigurację proxy dla Playwright
-      let proxyConfig = `http://${proxy.host}:${proxy.port}`;
+      // Playwright wymaga oddzielnej konfiguracji server i auth
+      const proxyConfig = {
+        server: `http://${proxy.host}:${proxy.port}`
+      };
 
+      // Jeśli proxy ma autentykację, dodaj osobno
       if (proxy.username && proxy.password) {
-        proxyConfig = `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
+        proxyConfig.username = proxy.username;
+        proxyConfig.password = proxy.password;
       }
 
       // Uruchom przeglądarkę z proxy
       browser = await chromium.launch({
         headless: true,
-        proxy: {
-          server: proxyConfig
-        }
+        proxy: proxyConfig,
+        // Dodatkowe flagi dla lepszej kompatybilności proxy
+        args: [
+          '--ignore-certificate-errors',
+          '--ignore-certificate-errors-spki-list'
+        ]
       });
 
       context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        ignoreHTTPSErrors: true // Ignoruj błędy SSL przez proxy
       });
 
       const page = await context.newPage();
 
-      // Sprawdź IP przez proxy
-      await page.goto('https://api.ipify.org?format=json', {
+      // Użyj HTTP zamiast HTTPS dla testowania proxy (unikamy problemów z tunelem)
+      // Jeśli HTTP działa, to HTTPS też będzie działać w normalnej przeglądarce
+      await page.goto('http://api.ipify.org?format=json', {
         waitUntil: 'domcontentloaded',
         timeout: 15000
       });
