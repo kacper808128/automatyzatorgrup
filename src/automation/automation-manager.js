@@ -1772,45 +1772,71 @@ class AutomationManager extends EventEmitter {
       await page.evaluate(() => window.scrollBy(0, 300));
       await randomDelay(1500, 2500);
 
-      // Znajdź przyciski reakcji - TYLKO właściwe przyciski, NIE linki do listy
+      // Znajdź przyciski reakcji - używamy DWÓCH metod (różne wersje Facebooka)
       const reactionButtons = await page.evaluate(() => {
         const buttons = [];
-        const candidates = document.querySelectorAll('[aria-label*="Like"], [aria-label*="Lubię to"], [aria-label*="lubię"]');
+
+        // METODA 1: Przez aria-label (różne wersje tekstu)
+        const candidates = document.querySelectorAll(
+          '[aria-label*="Like"], [aria-label*="like"], ' +
+          '[aria-label*="Lubię to"], [aria-label*="lubię to"], ' +
+          '[aria-label*="Lubię to!"], [aria-label*="lubię to!"]'
+        );
 
         for (const el of candidates) {
-          // 1. Sprawdź czy to button, NIE link (a[role="link"])
-          const isButton = el.getAttribute('role') === 'button' || el.closest('[role="button"]');
-          const isLink = el.tagName === 'A' || el.matches('a[role="link"]') || el.closest('a[role="link"]') || el.closest('a[href]');
+          // 1. Musi być w elemencie z role="button"
+          const buttonParent = el.closest('[role="button"]') || (el.getAttribute('role') === 'button' ? el : null);
+          if (!buttonParent) continue;
 
-          if (!isButton || isLink) continue;
+          // 2. NIE może być linkiem
+          const isLink = el.tagName === 'A' ||
+                        el.matches('a[role="link"]') ||
+                        el.closest('a[role="link"]') ||
+                        el.closest('a[href]');
+          if (isLink) continue;
 
-          // 2. Sprawdź czy nie zawiera liczby reakcji (to byłby licznik/link do listy)
-          const text = el.textContent || '';
+          // 3. NIE może zawierać liczby (licznik reakcji)
+          const text = buttonParent.textContent || '';
           const hasNumber = /\d/.test(text);
+          if (hasNumber) continue;
 
-          // 3. Sprawdź czy aria-label nie wskazuje na listę reakcji
+          // 4. aria-label NIE może wskazywać na listę
           const ariaLabel = el.getAttribute('aria-label') || '';
           const isReactionList = ariaLabel.toLowerCase().includes('see who reacted') ||
-                                ariaLabel.toLowerCase().includes('zobacz kto') ||
-                                ariaLabel.toLowerCase().includes('who reacted') ||
-                                ariaLabel.toLowerCase().includes('reactions') ||
-                                ariaLabel.toLowerCase().includes('reakcj');
+                                ariaLabel.toLowerCase().includes('zobacz kto zareag') ||
+                                ariaLabel.toLowerCase().includes('who reacted');
+          if (isReactionList) continue;
 
-          // 4. Musi mieć aria-pressed (tylko właściwe przyciski reakcji mają)
-          const hasAriaPressed = el.hasAttribute('aria-pressed');
+          // 5. NIE może mieć href
+          const hasHref = buttonParent.hasAttribute('href');
+          if (hasHref) continue;
 
-          // 5. Nie może mieć href (linki mają href)
-          const hasHref = el.hasAttribute('href') || (el.closest('[role="button"]') && el.closest('[role="button"]').hasAttribute('href'));
-
-          // TYLKO jeśli to button BEZ liczby, BEZ oznak listy, Z aria-pressed, BEZ href
-          if (isButton && !isLink && !hasNumber && !isReactionList && hasAriaPressed && !hasHref) {
-            el.setAttribute('data-reaction-button', 'true');
-            buttons.push(true);
-            console.log('DEBUG: Znaleziono przycisk reakcji:', ariaLabel);
-          } else {
-            console.log(`DEBUG: Pominięto element: isButton=${isButton}, isLink=${isLink}, hasNumber=${hasNumber}, isReactionList=${isReactionList}, hasAriaPressed=${hasAriaPressed}, label="${ariaLabel.substring(0, 30)}"`);
-          }
+          // Znaleziono właściwy przycisk!
+          buttonParent.setAttribute('data-reaction-button', 'true');
+          buttons.push(true);
+          console.log('DEBUG: Znaleziono przycisk reakcji (aria-label):', ariaLabel);
         }
+
+        // METODA 2: Przez data-ad-rendering-role="like_button" (nowe Facebooki)
+        const likeButtons = document.querySelectorAll('[data-ad-rendering-role="like_button"]');
+        for (const likeBtn of likeButtons) {
+          const buttonParent = likeBtn.closest('[role="button"]');
+          if (!buttonParent) continue;
+
+          // Sprawdź czy już nie oznaczyliśmy
+          if (buttonParent.hasAttribute('data-reaction-button')) continue;
+
+          // Sprawdź czy nie ma liczby
+          const text = buttonParent.textContent || '';
+          const hasNumber = /\d/.test(text);
+          if (hasNumber) continue;
+
+          buttonParent.setAttribute('data-reaction-button', 'true');
+          buttons.push(true);
+          console.log('DEBUG: Znaleziono przycisk reakcji (data-role)');
+        }
+
+        console.log(`DEBUG: Łącznie znaleziono ${buttons.length} przycisków reakcji`);
         return buttons.length;
       });
 
