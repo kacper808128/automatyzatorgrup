@@ -1965,9 +1965,9 @@ class AutomationManager extends EventEmitter {
         }
       }
 
-      // Poczekaj na modal
+      // Poczekaj na modal - zwiększony czas dla wolniejszych połączeń
       this.addLog(`${logPrefix} Czekam na otwarcie okna...`, 'info');
-      await randomDelay(4000, 6000);
+      await randomDelay(5000, 7000);
 
       // Znajdź pole tekstowe - TYLKO w modalu, NIE w komentarzach
       this.addLog(`${logPrefix} Szukam pola tekstowego w modalu...`, 'info');
@@ -1979,12 +1979,21 @@ class AutomationManager extends EventEmitter {
       const textAreaFound = await page.evaluate(() => {
         // Najpierw znajdź modal
         const modal = document.querySelector('[role="dialog"]');
-        if (!modal) return false;
+        if (!modal) {
+          console.log('DEBUG: Brak modalu [role="dialog"]');
+          return { found: false, reason: 'Brak modalu [role="dialog"]' };
+        }
 
         // Szukaj textarea TYLKO w modalu
         const textAreas = Array.from(modal.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
+        console.log(`DEBUG: Znaleziono ${textAreas.length} pól textarea w modalu`);
 
-        for (const area of textAreas) {
+        if (textAreas.length === 0) {
+          return { found: false, reason: `Brak pól textarea w modalu` };
+        }
+
+        for (let i = 0; i < textAreas.length; i++) {
+          const area = textAreas[i];
           const rect = area.getBoundingClientRect();
           const isVisible = rect.width > 0 && rect.height > 0 &&
                           rect.top >= 0 && rect.top < window.innerHeight;
@@ -1997,16 +2006,22 @@ class AutomationManager extends EventEmitter {
                                 placeholder.toLowerCase().includes('komentarz') ||
                                 placeholder.toLowerCase().includes('comment');
 
+          console.log(`DEBUG: Pole ${i}: visible=${isVisible}, isComment=${isCommentField}, label="${ariaLabel}", placeholder="${placeholder}"`);
+
           if (isVisible && !isCommentField) {
             area.setAttribute('data-post-textarea', 'true');
-            return true;
+            return { found: true };
           }
         }
-        return false;
+        return { found: false, reason: 'Wszystkie pola są niewidoczne lub są polami komentarzy' };
       });
 
-      if (!textAreaFound) {
-        throw new Error('Nie znaleziono pola tekstowego w modalu');
+      if (!textAreaFound.found) {
+        // Debug screenshot przed błędem
+        await this.captureErrorScreenshot(page, 'modal_textarea_not_found', accountName).catch(() => {});
+
+        this.addLog(`${logPrefix} ❌ Debug: ${textAreaFound.reason}`, 'error');
+        throw new Error(`Nie znaleziono pola tekstowego w modalu: ${textAreaFound.reason}`);
       }
 
       // Kliknij w pole i upewnij się że jest NAPRAWDĘ aktywne
@@ -2196,7 +2211,7 @@ class AutomationManager extends EventEmitter {
       this.addLog(`${logPrefix} ❌ Błąd postowania: ${error.message}`, 'error');
 
       // 📸 SCREENSHOT NA BŁĘDZIE
-      await this.captureErrorScreenshot(page, 'posting_error', `account${accountIndex}`);
+      await this.captureErrorScreenshot(page, 'posting_error', accountName).catch(() => {});
 
       throw error;
     }
