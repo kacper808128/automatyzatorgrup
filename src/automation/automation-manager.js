@@ -1822,11 +1822,23 @@ class AutomationManager extends EventEmitter {
                                 ariaLabel.toLowerCase().includes('reakcj');
           if (isReactionList) continue;
 
+          // 4a. Pomiń aria-label sugerujące licznik reakcji (np. kończące się na "reakcje")
+          const trimmedLabel = ariaLabel.trim().toLowerCase();
+          if (/reakcje?$/.test(trimmedLabel)) continue;
+
           // 4b. Pomiń elementy z licznikami reakcji
           if (buttonParent.querySelector('[data-testid*="see_who_reacted"], [data-testid*="reaction_profile"]')) {
             continue;
           }
 
+          // 4c. Pomiń elementy otwierające dialog/listę (często licznik reakcji)
+          const ariaHasPopup = buttonParent.getAttribute('aria-haspopup') || el.getAttribute('aria-haspopup');
+          if (ariaHasPopup && ariaHasPopup !== 'false') continue;
+
+          // 4d. Wymagaj stanu aria-pressed (faktyczny przycisk reakcji) + pozytywnej etykiety
+          const ariaPressedExists = buttonParent.hasAttribute('aria-pressed') || el.hasAttribute('aria-pressed');
+          if (!ariaPressedExists) continue;
+          if (!positiveLabelMatch(ariaLabel)) continue;
           // 4c. Pomiń elementy otwierające dialog (często lista reakcji)
           const hasDialogPopup = buttonParent.getAttribute('aria-haspopup') === 'dialog' ||
                                   el.getAttribute('aria-haspopup') === 'dialog';
@@ -1878,6 +1890,14 @@ class AutomationManager extends EventEmitter {
 
           // Pomiń elementy otwierające dialog (często lista reakcji)
           const ariaLabel = likeBtn.getAttribute('aria-label') || buttonParent.getAttribute('aria-label') || '';
+          const ariaHasPopup = buttonParent.getAttribute('aria-haspopup') || likeBtn.getAttribute('aria-haspopup');
+          if (ariaHasPopup && ariaHasPopup !== 'false') continue;
+
+          // Wymagaj stanu aria-pressed (faktyczny przycisk like) oraz pozytywnej etykiety
+          const ariaPressedExists = buttonParent.hasAttribute('aria-pressed') || likeBtn.hasAttribute('aria-pressed');
+          const hasPositiveLabel = positiveLabelMatch(ariaLabel);
+          if (!ariaPressedExists) continue;
+          if (!hasPositiveLabel) continue;
           const hasDialogPopup = buttonParent.getAttribute('aria-haspopup') === 'dialog' ||
                                   likeBtn.getAttribute('aria-haspopup') === 'dialog';
           if (hasDialogPopup) continue;
@@ -1978,6 +1998,16 @@ class AutomationManager extends EventEmitter {
             await randomDelay(500, 1000);
             // Nie zwiększaj reactedCount bo kliknęliśmy w zły element
             break;
+          }
+
+          // Zweryfikuj, że przycisk faktycznie zmienił stan na wciśnięty
+          const pressedAfterClick = await btn.evaluate(el => {
+            const parent = el.closest('[role="button"]') || el;
+            return parent.getAttribute('aria-pressed') === 'true';
+          });
+          if (!pressedAfterClick) {
+            this.addLog(`${logPrefix} ⚠️ Kliknięty element nie przyjął reakcji`, 'warning');
+            continue;
           }
 
           reactedCount++;
