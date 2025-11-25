@@ -70,6 +70,9 @@ class AutomationManager extends EventEmitter {
     );
     this.ensureScreenshotsDir();
 
+    // Track opened browsers for multi-account tasks to allow clean stop
+    this.activeBrowsers = new Set();
+
     // Concurrent accounts limit
     this.maxConcurrentAccounts = 5;
     this.activeAccountTasks = new Map(); // accountId -> Promise
@@ -1583,6 +1586,7 @@ class AutomationManager extends EventEmitter {
     try {
       // Uruchom osobną instancję przeglądarki dla tego konta (Playwright)
       browser = await chromium.launch(launchOptions);
+      this.activeBrowsers.add(browser);
 
       // Playwright: context z fingerprint settings
       context = await browser.newContext({
@@ -1754,6 +1758,7 @@ class AutomationManager extends EventEmitter {
       // Zawsze zamknij przeglądarkę
       if (browser) {
         await browser.close().catch(() => {});
+        this.activeBrowsers.delete(browser);
       }
     }
   }
@@ -1783,6 +1788,11 @@ class AutomationManager extends EventEmitter {
           '[aria-label*="Lubię to!"], [aria-label*="lubię to!"]'
         );
 
+        const positiveLabelMatch = (label = '') => {
+          const lower = label.toLowerCase();
+          return lower.includes('lubię to') || lower.includes('like');
+        };
+
         for (const el of candidates) {
           // 1. Musi być w elemencie z role="button"
           const buttonParent = el.closest('[role="button"]') || (el.getAttribute('role') === 'button' ? el : null);
@@ -1808,8 +1818,23 @@ class AutomationManager extends EventEmitter {
                                 ariaLabel.toLowerCase().includes('zobacz kto zareag') ||
                                 ariaLabel.toLowerCase().includes('who reacted') ||
                                 ariaLabel.toLowerCase().includes('view') ||
-                                ariaLabel.toLowerCase().includes('zobacz');
+                                ariaLabel.toLowerCase().includes('zobacz') ||
+                                ariaLabel.toLowerCase().includes('reakcj');
           if (isReactionList) continue;
+
+          // 4b. Pomiń elementy z licznikami reakcji
+          if (buttonParent.querySelector('[data-testid*="see_who_reacted"], [data-testid*="reaction_profile"]')) {
+            continue;
+          }
+
+          // 4c. Pomiń elementy otwierające dialog (często lista reakcji)
+          const hasDialogPopup = buttonParent.getAttribute('aria-haspopup') === 'dialog' ||
+                                  el.getAttribute('aria-haspopup') === 'dialog';
+          if (hasDialogPopup) continue;
+
+          // 4d. Wymagaj pozytywnego dopasowania etykiety (tylko faktyczne przyciski like)
+          const ariaPressedExists = buttonParent.hasAttribute('aria-pressed') || el.hasAttribute('aria-pressed');
+          if (!ariaPressedExists && !positiveLabelMatch(ariaLabel)) continue;
 
           // 5. NIE może mieć href ani onclick z href
           const hasHref = buttonParent.hasAttribute('href') ||
@@ -1850,6 +1875,17 @@ class AutomationManager extends EventEmitter {
           const text = buttonParent.textContent || '';
           const hasNumber = /\d/.test(text);
           if (hasNumber) continue;
+
+          // Pomiń elementy otwierające dialog (często lista reakcji)
+          const ariaLabel = likeBtn.getAttribute('aria-label') || buttonParent.getAttribute('aria-label') || '';
+          const hasDialogPopup = buttonParent.getAttribute('aria-haspopup') === 'dialog' ||
+                                  likeBtn.getAttribute('aria-haspopup') === 'dialog';
+          if (hasDialogPopup) continue;
+
+          // Wymagaj pozytywnego dopasowania etykiety lub aria-pressed
+          const ariaPressedExists = buttonParent.hasAttribute('aria-pressed') || likeBtn.hasAttribute('aria-pressed');
+          const hasPositiveLabel = positiveLabelMatch(ariaLabel);
+          if (!ariaPressedExists && !hasPositiveLabel) continue;
 
           // NIE może mieć href
           const hasHref = buttonParent.hasAttribute('href') ||
@@ -1941,7 +1977,7 @@ class AutomationManager extends EventEmitter {
             this.addLog(`${logPrefix} ⚠️ Zamknięto modal reakcji`, 'warning');
             await randomDelay(500, 1000);
             // Nie zwiększaj reactedCount bo kliknęliśmy w zły element
-            continue;
+            break;
           }
 
           reactedCount++;
@@ -3030,7 +3066,12 @@ class AutomationManager extends EventEmitter {
           'chronić społeczność przed spamem',
           'reducing spam',
           'nie jest to sprzeczne z naszymi Standardami',
-          'against our Community Standards'
+          'against our Community Standards',
+          'nie możesz teraz opublikować',
+          'nie możesz opublikować',
+          "you can't post right now",
+          'publikowanie jest tymczasowo ograniczone',
+          'tymczasowo ograniczyliśmy możliwość publikowania'
         ];
         
         // Sprawdź cały dokument
@@ -3075,7 +3116,29 @@ class AutomationManager extends EventEmitter {
             }
           }
         }
-        
+
+        // Sprawdź błędy tekstowe wewnątrz aktywnego dialogu publikacji
+        const dialog = document.querySelector('[role="dialog"]');
+        if (dialog) {
+          const dialogText = (dialog.innerText || dialog.textContent || '').toLowerCase();
+          const inlineErrorKeywords = [
+            'ograniczamy możliwość dodawania postów',
+            'nie możesz teraz opublikować',
+            'you can\'t post right now',
+            'publikowanie jest tymczasowo zablokowane',
+            'limit dodawania postów'
+          ];
+
+          for (const keyword of inlineErrorKeywords) {
+            if (dialogText.includes(keyword)) {
+              return {
+                detected: true,
+                message: keyword
+              };
+            }
+          }
+        }
+
         return { detected: false };
       });
       
@@ -3135,6 +3198,18 @@ class AutomationManager extends EventEmitter {
     this.isPaused = false;
     this.currentTask = null;
     await this.closeBrowser();
+
+    // Zamknij wszystkie aktywne instancje uruchomione dla wielu kont
+    for (const browser of Array.from(this.activeBrowsers)) {
+      try {
+        await browser.close();
+      } catch (e) {
+        // Ignoruj błędy zamykania
+      } finally {
+        this.activeBrowsers.delete(browser);
+      }
+    }
+
     this.addLog('Automatyzacja zatrzymana', 'warning');
     this.emit('status-change', this.getStatus());
   }
