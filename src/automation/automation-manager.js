@@ -1772,23 +1772,43 @@ class AutomationManager extends EventEmitter {
       await page.evaluate(() => window.scrollBy(0, 300));
       await randomDelay(1500, 2500);
 
-      // Znajdź przyciski reakcji - TYLKO te które są buttonami, NIE linkami
+      // Znajdź przyciski reakcji - TYLKO właściwe przyciski, NIE linki do listy
       const reactionButtons = await page.evaluate(() => {
         const buttons = [];
         const candidates = document.querySelectorAll('[aria-label*="Like"], [aria-label*="Lubię to"], [aria-label*="lubię"]');
 
         for (const el of candidates) {
-          // Sprawdź czy to button, NIE link (a[role="link"])
+          // 1. Sprawdź czy to button, NIE link (a[role="link"])
           const isButton = el.getAttribute('role') === 'button' || el.closest('[role="button"]');
-          const isNotLink = !el.matches('a[role="link"]') && !el.closest('a[role="link"]');
+          const isLink = el.tagName === 'A' || el.matches('a[role="link"]') || el.closest('a[role="link"]') || el.closest('a[href]');
 
-          // Sprawdź czy nie zawiera liczby reakcji (to byłby licznik/link do listy)
+          if (!isButton || isLink) continue;
+
+          // 2. Sprawdź czy nie zawiera liczby reakcji (to byłby licznik/link do listy)
           const text = el.textContent || '';
           const hasNumber = /\d/.test(text);
 
-          if (isButton && isNotLink && !hasNumber) {
+          // 3. Sprawdź czy aria-label nie wskazuje na listę reakcji
+          const ariaLabel = el.getAttribute('aria-label') || '';
+          const isReactionList = ariaLabel.toLowerCase().includes('see who reacted') ||
+                                ariaLabel.toLowerCase().includes('zobacz kto') ||
+                                ariaLabel.toLowerCase().includes('who reacted') ||
+                                ariaLabel.toLowerCase().includes('reactions') ||
+                                ariaLabel.toLowerCase().includes('reakcj');
+
+          // 4. Musi mieć aria-pressed (tylko właściwe przyciski reakcji mają)
+          const hasAriaPressed = el.hasAttribute('aria-pressed');
+
+          // 5. Nie może mieć href (linki mają href)
+          const hasHref = el.hasAttribute('href') || (el.closest('[role="button"]') && el.closest('[role="button"]').hasAttribute('href'));
+
+          // TYLKO jeśli to button BEZ liczby, BEZ oznak listy, Z aria-pressed, BEZ href
+          if (isButton && !isLink && !hasNumber && !isReactionList && hasAriaPressed && !hasHref) {
             el.setAttribute('data-reaction-button', 'true');
             buttons.push(true);
+            console.log('DEBUG: Znaleziono przycisk reakcji:', ariaLabel);
+          } else {
+            console.log(`DEBUG: Pominięto element: isButton=${isButton}, isLink=${isLink}, hasNumber=${hasNumber}, isReactionList=${isReactionList}, hasAriaPressed=${hasAriaPressed}, label="${ariaLabel.substring(0, 30)}"`);
           }
         }
         return buttons.length;
@@ -1798,6 +1818,8 @@ class AutomationManager extends EventEmitter {
         this.addLog(`${logPrefix} Nie znaleziono przycisków reakcji`, 'info');
         return 0;
       }
+
+      this.addLog(`${logPrefix} Znaleziono ${reactionButtons} przycisków reakcji`, 'info');
 
       // Pobierz zaznaczone przyciski
       const markedButtons = await page.$$('[data-reaction-button="true"]');
