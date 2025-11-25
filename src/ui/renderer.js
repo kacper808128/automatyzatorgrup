@@ -108,11 +108,17 @@ function renderAccountsList() {
             name: 'Konto #1',
             cookies: '',
             proxyId: null,
-            status: 'unknown'
+            status: 'unknown',
+            enabled: true
         });
     }
 
     accounts.forEach((account, index) => {
+        // Default enabled to true if not set
+        if (account.enabled === undefined) {
+            account.enabled = true;
+        }
+
         const div = document.createElement('div');
         div.className = 'account-item';
         div.dataset.accountId = account.id;
@@ -124,6 +130,8 @@ function renderAccountsList() {
         div.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                 <div style="display: flex; align-items: center; gap: 10px;">
+                    <input type="checkbox" class="account-enabled-checkbox" ${account.enabled ? 'checked' : ''}
+                           style="width: 18px; height: 18px; cursor: pointer;" title="Zaznacz aby użyć tego konta w postowaniu">
                     <span class="account-status" style="font-size: 18px;">${statusIcon}</span>
                     <input type="text" class="account-name" value="${account.name || `Konto #${index + 1}`}"
                            style="background: transparent; border: none; color: #00ff88; font-weight: bold; font-size: 14px; width: 150px;">
@@ -143,6 +151,11 @@ function renderAccountsList() {
         container.appendChild(div);
 
         // Event listeners
+        div.querySelector('.account-enabled-checkbox').addEventListener('change', (e) => {
+            account.enabled = e.target.checked;
+            updatePreStartStatus();
+        });
+
         div.querySelector('.remove-account-btn').addEventListener('click', () => {
             accounts = accounts.filter(a => a.id !== account.id);
             renderAccountsList();
@@ -199,7 +212,8 @@ function setupEventListeners() {
             name: `Konto #${accounts.length + 1}`,
             cookies: '',
             proxyId: null,
-            status: 'unknown'
+            status: 'unknown',
+            enabled: true
         });
         renderAccountsList();
         updatePreStartStatus();
@@ -278,6 +292,10 @@ function setupEventListeners() {
     document.getElementById('startPostingBtn')?.addEventListener('click', startPosting);
     document.getElementById('stopPostingBtn')?.addEventListener('click', stopPosting);
 
+    // === PLAYGROUND ===
+    document.getElementById('runPlaygroundBtn')?.addEventListener('click', runPlayground);
+    document.getElementById('stopPlaygroundBtn')?.addEventListener('click', stopPlayground);
+
     // === PROXY ===
     document.getElementById('addNewProxyBtn')?.addEventListener('click', addNewProxy);
     document.getElementById('testNewProxyBtn')?.addEventListener('click', testNewProxy);
@@ -335,6 +353,7 @@ function syncAccountsFromDOM() {
             account.name = item.querySelector('.account-name')?.value || account.name;
             account.cookies = item.querySelector('.account-cookies')?.value || '';
             account.proxyId = item.querySelector('.account-proxy')?.value || null;
+            account.enabled = item.querySelector('.account-enabled-checkbox')?.checked ?? true;
         }
     });
 }
@@ -343,11 +362,11 @@ function syncAccountsFromDOM() {
 async function startPosting() {
     syncAccountsFromDOM();
 
-    // Pobierz konta z cookies
-    const accountsWithCookies = accounts.filter(a => a.cookies && a.cookies.trim());
+    // Pobierz konta z cookies i zaznaczone jako aktywne
+    const accountsWithCookies = accounts.filter(a => a.cookies && a.cookies.trim() && a.enabled !== false);
 
     if (accountsWithCookies.length === 0) {
-        showToast('Dodaj przynajmniej jedno konto z cookies', 'error');
+        showToast('Zaznacz przynajmniej jedno konto z cookies', 'error');
         return;
     }
 
@@ -429,6 +448,76 @@ async function stopPosting() {
         showToast('⏹️ Zatrzymano', 'warning');
         document.getElementById('startPostingBtn').disabled = false;
         document.getElementById('stopPostingBtn').disabled = true;
+    }
+}
+
+// ===== PLAYGROUND =====
+async function runPlayground() {
+    const url = document.getElementById('playgroundUrl')?.value;
+    const instructions = document.getElementById('playgroundInstructions')?.value;
+    const cookiesText = document.getElementById('playgroundCookies')?.value;
+
+    if (!url || !instructions) {
+        showToast('Wypełnij URL i instrukcje', 'error');
+        return;
+    }
+
+    const config = {
+        url,
+        instructions,
+        cookies: cookiesText && cookiesText.trim() ? cookiesText : null
+    };
+
+    document.getElementById('runPlaygroundBtn').disabled = true;
+    document.getElementById('stopPlaygroundBtn').disabled = false;
+
+    const logsContainer = document.getElementById('playgroundLogs');
+    logsContainer.innerHTML = '<p style="color: #00ff88;">⏳ Uruchamiam...</p>';
+
+    try {
+        const result = await ipcRenderer.invoke('run-playground', config);
+
+        logsContainer.innerHTML = '';
+
+        if (result.logs && result.logs.length > 0) {
+            result.logs.forEach(log => {
+                const entry = document.createElement('div');
+                entry.style.marginBottom = '5px';
+                const timestamp = new Date(log.timestamp).toLocaleTimeString();
+                const colors = {
+                    'info': '#4a9eff',
+                    'success': '#00ff88',
+                    'warning': '#ffaa00',
+                    'error': '#ff4444',
+                    'code': '#ff00ff',
+                    'result': '#00ffff'
+                };
+                const color = colors[log.type] || '#888';
+                entry.innerHTML = `<span style="color: #666;">[${timestamp}]</span> <span style="color: ${color};">${log.message}</span>`;
+                logsContainer.appendChild(entry);
+            });
+        }
+
+        if (result.success) {
+            showToast('✅ Playground wykonany!', 'success');
+        } else {
+            showToast(`Błąd: ${result.error}`, 'error');
+        }
+    } catch (e) {
+        showToast(`Błąd: ${e.message}`, 'error');
+        logsContainer.innerHTML = `<p style="color: #ff4444;">❌ Błąd: ${e.message}</p>`;
+    } finally {
+        document.getElementById('runPlaygroundBtn').disabled = false;
+        document.getElementById('stopPlaygroundBtn').disabled = true;
+    }
+}
+
+async function stopPlayground() {
+    const result = await ipcRenderer.invoke('stop-playground');
+    if (result.success) {
+        showToast('⏹️ Playground zatrzymany', 'warning');
+        document.getElementById('runPlaygroundBtn').disabled = false;
+        document.getElementById('stopPlaygroundBtn').disabled = true;
     }
 }
 
@@ -554,6 +643,7 @@ function updatePreStartStatus() {
 
     const validAccounts = accounts.filter(a => {
         if (!a.cookies || !a.cookies.trim()) return false;
+        if (a.enabled === false) return false; // Filtruj odznaczone konta
         try {
             JSON.parse(a.cookies);
             return true;
