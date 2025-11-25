@@ -262,6 +262,15 @@ ipcMain.handle('remove-proxy', async (event, proxyId) => {
   }
 });
 
+ipcMain.handle('update-proxy', async (event, { proxyId, updates }) => {
+  try {
+    const result = automationManager.updateProxy(proxyId, updates);
+    return { success: true, proxy: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('get-proxy-list', async () => {
   return automationManager.getProxyList();
 });

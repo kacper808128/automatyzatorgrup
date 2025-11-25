@@ -569,6 +569,26 @@ class AutomationManager extends EventEmitter {
   }
 
   /**
+   * Aktualizuje istniejące proxy
+   * @param {string} proxyId - ID proxy do aktualizacji
+   * @param {Object} updates - Nowe dane { name?, host?, port?, username?, password? }
+   */
+  updateProxy(proxyId, updates) {
+    const index = this.proxyList.findIndex(p => p.id === proxyId);
+    if (index >= 0) {
+      this.proxyList[index] = {
+        ...this.proxyList[index],
+        ...updates,
+        updatedAt: new Date().toISOString()
+      };
+      this.store.set('proxyList', this.proxyList);
+      this.addLog(`Zaktualizowano proxy #${proxyId}`, 'info');
+      return this.proxyList[index];
+    }
+    return null;
+  }
+
+  /**
    * Pobiera listę wszystkich proxy
    */
   getProxyList() {
@@ -609,38 +629,65 @@ class AutomationManager extends EventEmitter {
   }
 
   /**
-   * Testuje proxy
+   * Testuje proxy używając Playwright
    * @param {Object} proxy - { host, port, username?, password? }
    */
   async testProxy(proxy) {
-    const axios = require('axios');
+    let browser = null;
+    let context = null;
 
     try {
-      const proxyConfig = {
-        host: proxy.host,
-        port: parseInt(proxy.port)
-      };
+      // Przygotuj konfigurację proxy dla Playwright
+      let proxyConfig = `http://${proxy.host}:${proxy.port}`;
 
       if (proxy.username && proxy.password) {
-        proxyConfig.auth = {
-          username: proxy.username,
-          password: proxy.password
-        };
+        proxyConfig = `http://${proxy.username}:${proxy.password}@${proxy.host}:${proxy.port}`;
       }
 
-      const response = await axios.get('https://api.ipify.org?format=json', {
-        proxy: proxyConfig,
+      // Uruchom przeglądarkę z proxy
+      browser = await this.playwright.chromium.launch({
+        headless: true,
+        proxy: {
+          server: proxyConfig
+        }
+      });
+
+      context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      });
+
+      const page = await context.newPage();
+
+      // Sprawdź IP przez proxy
+      await page.goto('https://api.ipify.org?format=json', {
+        waitUntil: 'domcontentloaded',
         timeout: 15000
       });
 
+      const content = await page.textContent('body');
+      const data = JSON.parse(content);
+
+      await page.close();
+      await context.close();
+      await browser.close();
+
       return {
         success: true,
-        ip: response.data.ip,
-        message: `Proxy działa! IP: ${response.data.ip}`
+        ip: data.ip,
+        message: `Proxy działa! IP: ${data.ip}`
       };
     } catch (error) {
+      // Zamknij zasoby w razie błędu
+      try {
+        if (context) await context.close();
+        if (browser) await browser.close();
+      } catch (e) {
+        // Ignoruj błędy zamykania
+      }
+
       return {
         success: false,
+        error: error.message,
         message: `Proxy nie działa: ${error.message}`
       };
     }
@@ -1144,7 +1191,8 @@ class AutomationManager extends EventEmitter {
   }
 
   async startPostingMultiAccount(config) {
-    const { posts, accounts, delayBetweenPosts, validateCookiesOnline = false } = config;
+    const { posts, accounts, validateCookiesOnline = false } = config;
+    // delayBetweenPosts usunięte - używamy automatycznego 4-18 min z activity-limiter
 
     this.addLog(`🚀 Rozpoczynam postowanie wielokontowe`, 'info');
     this.addLog(`📊 Konta do sprawdzenia: ${accounts.length}`, 'info');
@@ -1252,7 +1300,7 @@ class AutomationManager extends EventEmitter {
         const taskPromise = (async () => {
           try {
             this.addLog(`▶️ Uruchamiam konto ${task.accountName} (${executing.size + 1}/${maxConcurrent} aktywnych)`, 'info');
-            await this.runAccountTaskIsolated(task, delayBetweenPosts);
+            await this.runAccountTaskIsolated(task);
             results.push({ accountId: task.accountId, success: true });
           } catch (error) {
             this.addLog(`❌ Błąd konta ${task.accountName}: ${error.message}`, 'error');
@@ -1322,7 +1370,7 @@ class AutomationManager extends EventEmitter {
     }
   }
 
-  async runAccountTaskIsolated(task, delayBetweenPosts) {
+  async runAccountTaskIsolated(task) {
     const { accountIndex, accountName, cookies, posts, proxy } = task;
     const { chromium } = require('playwright');
 
@@ -1490,10 +1538,11 @@ class AutomationManager extends EventEmitter {
         }
 
         if (i < posts.length - 1 && this.isRunning) {
-          const delay = delayBetweenPosts * 1000 + Math.random() * 30000;
-          const delayMin = Math.round(delay / 60000 * 10) / 10;
+          // Użyj automatycznego opóźnienia 4-18 min z gaussian distribution
+          const delayMs = this.activityLimiter.getDelayBetweenGroups();
+          const delayMin = Math.round(delayMs / 60000 * 10) / 10;
           this.addLog(`${logPrefix} ⏳ Czekam ${delayMin} min przed następnym postem...`, 'info');
-          await randomDelay(delay * 0.9, delay * 1.1);
+          await randomDelay(delayMs * 0.95, delayMs * 1.05); // Małe losowe odchylenie ±5%
         }
       }
 
@@ -1523,6 +1572,64 @@ class AutomationManager extends EventEmitter {
     }
   }
 
+  /**
+   * Reaguje na losowe posty w grupie (like/love)
+   * @param {Page} page - Playwright page
+   * @param {string} logPrefix - Prefix do logów
+   * @param {number} count - Ile reakcji dać
+   */
+  async reactToGroupPosts(page, logPrefix, count = 2) {
+    try {
+      this.addLog(`${logPrefix} 👍 Daję reakcje na posty w grupie...`, 'info');
+
+      // Scrolluj trochę żeby załadować posty
+      await page.evaluate(() => window.scrollBy(0, 300));
+      await randomDelay(1500, 2500);
+
+      // Znajdź przyciski reakcji (Like/Lubię to)
+      const reactionButtons = await page.$$('div[aria-label*="Like"], div[aria-label*="Lubię to"], div[aria-label*="lubię"], span[aria-label*="Like"]');
+
+      if (reactionButtons.length === 0) {
+        this.addLog(`${logPrefix} Nie znaleziono przycisków reakcji`, 'info');
+        return 0;
+      }
+
+      // Wybierz losowe przyciski (max count)
+      const shuffled = reactionButtons.sort(() => 0.5 - Math.random());
+      const toReact = shuffled.slice(0, Math.min(count, shuffled.length));
+
+      let reactedCount = 0;
+      for (const btn of toReact) {
+        try {
+          // Sprawdź czy już nie zareagowaliśmy
+          const isReacted = await btn.evaluate(el => {
+            const parent = el.closest('[role="button"]') || el;
+            return parent.getAttribute('aria-pressed') === 'true';
+          });
+
+          if (isReacted) continue;
+
+          // Kliknij reakcję
+          await btn.click();
+          reactedCount++;
+          this.addLog(`${logPrefix} ❤️ Reakcja ${reactedCount}/${count}`, 'success');
+          await randomDelay(1000, 2000);
+        } catch (e) {
+          // Ignoruj błędy pojedynczych reakcji
+        }
+      }
+
+      // Scrolluj z powrotem na górę
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await randomDelay(1000, 2000);
+
+      return reactedCount;
+    } catch (error) {
+      this.addLog(`${logPrefix} ⚠️ Błąd reakcji: ${error.message}`, 'warning');
+      return 0;
+    }
+  }
+
   async postToGroupInline(page, groupUrl, message, accountName) {
     // KOPIA postToGroup ale używa page zamiast this.page
     const logPrefix = `[${accountName}]`;
@@ -1549,6 +1656,12 @@ class AutomationManager extends EventEmitter {
       if (!currentUrl.includes('facebook.com/groups')) {
         throw new Error('Nie udało się przejść do grupy');
       }
+
+      // =============================================
+      // REAKCJE PRZED POSTOWANIEM (1-3 losowych reakcji)
+      // =============================================
+      const reactCount = 1 + Math.floor(Math.random() * 3); // 1-3
+      await this.reactToGroupPosts(page, logPrefix, reactCount);
 
       // Scrolluj na górę
       await page.evaluate(() => window.scrollTo(0, 0));
@@ -1824,6 +1937,13 @@ class AutomationManager extends EventEmitter {
       await randomDelay(3000, 4000);
       
       this.addLog(`${logPrefix} ✅ Post opublikowany pomyślnie!`, 'success');
+
+      // =============================================
+      // REAKCJE PO POSTOWANIU (1-2 losowych reakcji)
+      // =============================================
+      await randomDelay(3000, 5000); // Poczekaj chwilę po publikacji
+      const postReactCount = 1 + Math.floor(Math.random() * 2); // 1-2
+      await this.reactToGroupPosts(page, logPrefix, postReactCount);
 
     } catch (error) {
       this.addLog(`${logPrefix} ❌ Błąd postowania: ${error.message}`, 'error');

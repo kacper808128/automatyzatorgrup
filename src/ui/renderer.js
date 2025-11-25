@@ -41,6 +41,7 @@ async function loadAllData() {
     await loadProxyConfig();
     await loadCredentials();
     renderAccountsList();
+    await renderProxyList();
     updatePreStartStatus();
 }
 
@@ -278,17 +279,21 @@ function setupEventListeners() {
     document.getElementById('stopPostingBtn')?.addEventListener('click', stopPosting);
 
     // === PROXY ===
-    document.getElementById('proxyEnabled')?.addEventListener('change', (e) => {
-        document.getElementById('proxyConfig').style.display = e.target.checked ? 'block' : 'none';
-    });
-
-    document.getElementById('saveProxyBtn')?.addEventListener('click', saveProxy);
-    document.getElementById('testProxyBtn')?.addEventListener('click', testProxy);
+    document.getElementById('addNewProxyBtn')?.addEventListener('click', addNewProxy);
+    document.getElementById('testNewProxyBtn')?.addEventListener('click', testNewProxy);
+    document.getElementById('refreshProxyListBtn')?.addEventListener('click', renderProxyList);
 
     // === LOGI ===
     document.getElementById('clearLogsBtn')?.addEventListener('click', () => {
         if (confirm('Wyczyścić logi?')) {
             document.getElementById('logsContainer').innerHTML = '';
+        }
+    });
+
+    document.getElementById('clearPostingLogsBtn')?.addEventListener('click', () => {
+        const container = document.getElementById('postingLogsContainer');
+        if (container) {
+            container.innerHTML = '<p style="color: #666;">Logi pojawią się tutaj po rozpoczęciu postowania...</p>';
         }
     });
 
@@ -380,8 +385,6 @@ async function startPosting() {
         return;
     }
 
-    const delay = parseInt(document.getElementById('delayBetweenPosts')?.value) || 90;
-
     // Wyłącz przyciski
     document.getElementById('startPostingBtn').disabled = true;
     document.getElementById('stopPostingBtn').disabled = false;
@@ -390,6 +393,12 @@ async function startPosting() {
     showToast(`🚀 Uruchamiam ${accountsWithCookies.length} kont z ${posts.length} postami`, 'info');
 
     try {
+        // Wyczyść logi postowania
+        const logsContainer = document.getElementById('postingLogsContainer');
+        if (logsContainer) {
+            logsContainer.innerHTML = '';
+        }
+
         const result = await ipcRenderer.invoke('start-posting-multi', {
             posts: posts,
             accounts: accountsWithCookies.map(a => ({
@@ -397,8 +406,8 @@ async function startPosting() {
                 name: a.name,
                 cookies: a.cookies,
                 proxyId: a.proxyId
-            })),
-            delayBetweenPosts: delay
+            }))
+            // Delay automatyczny 4-18 min - ustawiany w automation-manager
         });
 
         if (result.success) {
@@ -437,65 +446,103 @@ function loadCsvFile() {
     reader.onload = (e) => {
         try {
             const text = e.target.result;
-            const lines = text.split('\n').filter(line => line.trim());
 
-            if (lines.length < 2) {
+            // Lepszy parser CSV obsługujący wieloliniowe wartości w cudzysłowach
+            const parseCSV = (csvText) => {
+                const rows = [];
+                let currentRow = [];
+                let currentField = '';
+                let inQuotes = false;
+
+                for (let i = 0; i < csvText.length; i++) {
+                    const char = csvText[i];
+                    const nextChar = csvText[i + 1];
+
+                    if (inQuotes) {
+                        if (char === '"' && nextChar === '"') {
+                            // Escaped quote
+                            currentField += '"';
+                            i++;
+                        } else if (char === '"') {
+                            // End of quoted field
+                            inQuotes = false;
+                        } else {
+                            currentField += char;
+                        }
+                    } else {
+                        if (char === '"') {
+                            inQuotes = true;
+                        } else if (char === ',') {
+                            currentRow.push(currentField.trim());
+                            currentField = '';
+                        } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
+                            currentRow.push(currentField.trim());
+                            if (currentRow.some(f => f)) { // Skip empty rows
+                                rows.push(currentRow);
+                            }
+                            currentRow = [];
+                            currentField = '';
+                            if (char === '\r') i++; // Skip \n in \r\n
+                        } else if (char !== '\r') {
+                            currentField += char;
+                        }
+                    }
+                }
+
+                // Last field/row
+                if (currentField || currentRow.length > 0) {
+                    currentRow.push(currentField.trim());
+                    if (currentRow.some(f => f)) {
+                        rows.push(currentRow);
+                    }
+                }
+
+                return rows;
+            };
+
+            const rows = parseCSV(text);
+
+            if (rows.length < 2) {
                 showToast('CSV jest pusty', 'error');
                 return;
             }
 
-            const separator = lines[0].includes('\t') ? '\t' : ',';
-
-            const parseCSVLine = (line) => {
-                const result = [];
-                let current = '';
-                let inQuotes = false;
-                for (let i = 0; i < line.length; i++) {
-                    const char = line[i];
-                    if (char === '"') inQuotes = !inQuotes;
-                    else if (char === separator && !inQuotes) {
-                        result.push(current.trim().replace(/^"|"$/g, ''));
-                        current = '';
-                    } else {
-                        current += char;
-                    }
-                }
-                result.push(current.trim().replace(/^"|"$/g, ''));
-                return result;
-            };
-
-            const headers = parseCSVLine(lines[0]);
+            const headers = rows[0].map(h => h.toLowerCase().trim());
             const groupLinkIdx = headers.indexOf('group_link');
             const postCopyIdx = headers.indexOf('post_copy');
 
             if (groupLinkIdx === -1 || postCopyIdx === -1) {
                 showToast('CSV musi zawierać kolumny: group_link i post_copy', 'error');
+                console.log('Headers found:', headers);
                 return;
             }
 
             const posts = [];
-            for (let i = 1; i < lines.length; i++) {
-                const values = parseCSVLine(lines[i]);
-                const groupLink = values[groupLinkIdx];
-                const postCopy = values[postCopyIdx];
-                if (groupLink && postCopy) {
+            for (let i = 1; i < rows.length; i++) {
+                const row = rows[i];
+                const groupLink = row[groupLinkIdx]?.trim();
+                const postCopy = row[postCopyIdx]?.trim();
+
+                // Sprawdź czy to prawidłowy link do grupy FB
+                if (groupLink && postCopy && groupLink.includes('facebook.com/groups')) {
                     posts.push({ groupLink, postCopy });
                 }
             }
 
             if (posts.length === 0) {
-                showToast('Nie znaleziono postów', 'error');
+                showToast('Nie znaleziono prawidłowych postów', 'error');
                 return;
             }
 
             csvData = posts;
             document.getElementById('csvPreview').style.display = 'block';
-            document.getElementById('csvStats').textContent = `${posts.length} postów z ${new Set(posts.map(p => p.groupLink)).size} grup`;
+            document.getElementById('csvStats').textContent = `${posts.length} postów do ${new Set(posts.map(p => p.groupLink)).size} grup`;
             showToast(`✅ Załadowano ${posts.length} postów`, 'success');
             updatePreStartStatus();
 
         } catch (err) {
             showToast(`Błąd CSV: ${err.message}`, 'error');
+            console.error('CSV parse error:', err);
         }
     };
     reader.readAsText(file);
@@ -532,50 +579,164 @@ function updatePreStartStatus() {
 }
 
 // ===== PROXY =====
-async function saveProxy() {
-    const config = {
-        enabled: document.getElementById('proxyEnabled').checked,
-        host: document.getElementById('proxyHost').value.trim(),
-        port: document.getElementById('proxyPort').value.trim(),
-        username: document.getElementById('proxyUsername').value.trim(),
-        password: document.getElementById('proxyPassword').value.trim()
-    };
+async function addNewProxy() {
+    const name = document.getElementById('newProxyName').value.trim();
+    const host = document.getElementById('newProxyHost').value.trim();
+    const port = document.getElementById('newProxyPort').value.trim();
+    const username = document.getElementById('newProxyUsername').value.trim();
+    const password = document.getElementById('newProxyPassword').value.trim();
 
-    // Jeśli enabled, dodaj też do listy proxy
-    if (config.enabled && config.host && config.port) {
-        const newProxy = {
-            id: 'proxy_' + Date.now(),
-            name: `${config.host}:${config.port}`,
-            host: config.host,
-            port: config.port,
-            username: config.username,
-            password: config.password
-        };
-        await ipcRenderer.invoke('add-proxy', newProxy);
-        await loadProxyList();
-        renderAccountsList();
+    if (!host || !port) {
+        showToast('Podaj host i port proxy', 'error');
+        return;
     }
 
-    const result = await ipcRenderer.invoke('save-proxy', config);
-    showToast(result.success ? 'Proxy zapisane' : result.error, result.success ? 'success' : 'error');
-}
-
-async function testProxy() {
-    const config = {
-        host: document.getElementById('proxyHost').value.trim(),
-        port: document.getElementById('proxyPort').value.trim(),
-        username: document.getElementById('proxyUsername').value.trim(),
-        password: document.getElementById('proxyPassword').value.trim()
+    const newProxy = {
+        name: name || `${host}:${port}`,
+        host: host,
+        port: port,
+        username: username,
+        password: password
     };
 
-    if (!config.host || !config.port) {
+    const result = await ipcRenderer.invoke('add-proxy', newProxy);
+
+    if (result.success) {
+        showToast('✅ Proxy dodane!', 'success');
+        // Wyczyść formularz
+        document.getElementById('newProxyName').value = '';
+        document.getElementById('newProxyHost').value = '';
+        document.getElementById('newProxyPort').value = '';
+        document.getElementById('newProxyUsername').value = '';
+        document.getElementById('newProxyPassword').value = '';
+
+        await loadProxyList();
+        await renderProxyList();
+        renderAccountsList();
+    } else {
+        showToast(`❌ ${result.error}`, 'error');
+    }
+}
+
+async function testNewProxy() {
+    const host = document.getElementById('newProxyHost').value.trim();
+    const port = document.getElementById('newProxyPort').value.trim();
+    const username = document.getElementById('newProxyUsername').value.trim();
+    const password = document.getElementById('newProxyPassword').value.trim();
+
+    if (!host || !port) {
         showToast('Podaj host i port proxy', 'error');
         return;
     }
 
     showToast('Testuję proxy...', 'info');
-    const result = await ipcRenderer.invoke('test-proxy', config);
-    showToast(result.success ? '✅ Proxy działa!' : `❌ ${result.error || 'Proxy nie działa'}`, result.success ? 'success' : 'error');
+    const result = await ipcRenderer.invoke('test-proxy', { host, port, username, password });
+
+    if (result.success) {
+        showToast(`✅ Proxy działa! IP: ${result.ip}`, 'success');
+    } else {
+        showToast(`❌ ${result.message || result.error || 'Proxy nie działa'}`, 'error');
+    }
+}
+
+async function renderProxyList() {
+    await loadProxyList();
+    const container = document.getElementById('proxyListContainer');
+
+    if (!container) return;
+
+    if (!proxyList || proxyList.length === 0) {
+        container.innerHTML = '<p style="color: #666;">Brak dodanych proxy...</p>';
+        return;
+    }
+
+    container.innerHTML = `
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="border-bottom: 1px solid #333;">
+                    <th style="padding: 10px; text-align: left;">Nazwa</th>
+                    <th style="padding: 10px; text-align: left;">Host:Port</th>
+                    <th style="padding: 10px; text-align: left;">Auth</th>
+                    <th style="padding: 10px; text-align: center;">Akcje</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${proxyList.map(proxy => `
+                    <tr style="border-bottom: 1px solid #222;">
+                        <td style="padding: 10px;">${proxy.name || '-'}</td>
+                        <td style="padding: 10px;">${proxy.host}:${proxy.port}</td>
+                        <td style="padding: 10px;">${proxy.username ? '🔐 Tak' : '❌ Nie'}</td>
+                        <td style="padding: 10px; text-align: center;">
+                            <button class="btn btn-secondary btn-sm" onclick="testProxyById('${proxy.id}')">🔍 Test</button>
+                            <button class="btn btn-secondary btn-sm" onclick="editProxy('${proxy.id}')">✏️ Edytuj</button>
+                            <button class="btn btn-danger btn-sm" onclick="deleteProxy('${proxy.id}')">🗑️ Usuń</button>
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+async function testProxyById(proxyId) {
+    const proxy = proxyList.find(p => p.id === proxyId);
+    if (!proxy) return;
+
+    showToast('Testuję proxy...', 'info');
+    const result = await ipcRenderer.invoke('test-proxy', proxy);
+
+    if (result.success) {
+        showToast(`✅ ${proxy.name || proxy.host} działa! IP: ${result.ip}`, 'success');
+    } else {
+        showToast(`❌ ${proxy.name || proxy.host}: ${result.message || result.error}`, 'error');
+    }
+}
+
+async function editProxy(proxyId) {
+    const proxy = proxyList.find(p => p.id === proxyId);
+    if (!proxy) return;
+
+    const name = prompt('Nazwa:', proxy.name || '');
+    const host = prompt('Host:', proxy.host);
+    const port = prompt('Port:', proxy.port);
+    const username = prompt('Username (zostaw puste jeśli brak):', proxy.username || '');
+    const password = prompt('Hasło (zostaw puste jeśli brak):', proxy.password || '');
+
+    if (host && port) {
+        const updates = {
+            name: name || `${host}:${port}`,
+            host: host,
+            port: port,
+            username: username,
+            password: password
+        };
+
+        const result = await ipcRenderer.invoke('update-proxy', { proxyId, updates });
+
+        if (result.success) {
+            showToast('✅ Proxy zaktualizowane!', 'success');
+            await loadProxyList();
+            await renderProxyList();
+            renderAccountsList();
+        } else {
+            showToast(`❌ ${result.error}`, 'error');
+        }
+    }
+}
+
+async function deleteProxy(proxyId) {
+    if (!confirm('Czy na pewno usunąć to proxy?')) return;
+
+    const result = await ipcRenderer.invoke('remove-proxy', proxyId);
+
+    if (result.success) {
+        showToast('✅ Proxy usunięte!', 'success');
+        await loadProxyList();
+        await renderProxyList();
+        renderAccountsList();
+    } else {
+        showToast(`❌ ${result.error}`, 'error');
+    }
 }
 
 // ===== IPC LISTENERS =====
@@ -587,6 +748,8 @@ function setupIpcListeners() {
 
     ipcRenderer.on('new-log', (event, log) => {
         addLogEntry(log);
+        // Dodaj też do logów postowania jeśli dotyczy postowania
+        addPostingLogEntry(log);
     });
 
     ipcRenderer.on('notification', (event, data) => {
@@ -600,6 +763,36 @@ function setupIpcListeners() {
     ipcRenderer.on('facebook-block-detected', (event, data) => {
         showToast('🚫 ZABLOKOWANO!', data.message, 'error');
     });
+}
+
+// Dodaj log do sekcji postowania
+function addPostingLogEntry(log) {
+    const container = document.getElementById('postingLogsContainer');
+    if (!container) return;
+
+    // Usuń placeholder jeśli jest
+    const placeholder = container.querySelector('p');
+    if (placeholder && placeholder.textContent.includes('Logi pojawią się')) {
+        placeholder.remove();
+    }
+
+    const entry = document.createElement('div');
+    entry.style.marginBottom = '5px';
+    entry.style.padding = '3px 0';
+    entry.style.borderBottom = '1px solid #222';
+
+    const timestamp = new Date(log.timestamp).toLocaleTimeString('pl-PL');
+    const colors = {
+        'info': '#4a9eff',
+        'success': '#00ff88',
+        'warning': '#ffaa00',
+        'error': '#ff4444'
+    };
+    const color = colors[log.type] || '#888';
+
+    entry.innerHTML = `<span style="color: #666;">[${timestamp}]</span> <span style="color: ${color};">${log.message}</span>`;
+    container.appendChild(entry);
+    container.scrollTop = container.scrollHeight;
 }
 
 function updateStatusIndicator() {
