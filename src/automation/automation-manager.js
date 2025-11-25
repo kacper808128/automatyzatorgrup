@@ -1788,6 +1788,11 @@ class AutomationManager extends EventEmitter {
           '[aria-label*="Lubię to!"], [aria-label*="lubię to!"]'
         );
 
+        const positiveLabelMatch = (label = '') => {
+          const lower = label.toLowerCase();
+          return lower.includes('lubię to') || lower.includes('like');
+        };
+
         for (const el of candidates) {
           // 1. Musi być w elemencie z role="button"
           const buttonParent = el.closest('[role="button"]') || (el.getAttribute('role') === 'button' ? el : null);
@@ -1821,6 +1826,15 @@ class AutomationManager extends EventEmitter {
           if (buttonParent.querySelector('[data-testid*="see_who_reacted"], [data-testid*="reaction_profile"]')) {
             continue;
           }
+
+          // 4c. Pomiń elementy otwierające dialog (często lista reakcji)
+          const hasDialogPopup = buttonParent.getAttribute('aria-haspopup') === 'dialog' ||
+                                  el.getAttribute('aria-haspopup') === 'dialog';
+          if (hasDialogPopup) continue;
+
+          // 4d. Wymagaj pozytywnego dopasowania etykiety (tylko faktyczne przyciski like)
+          const ariaPressedExists = buttonParent.hasAttribute('aria-pressed') || el.hasAttribute('aria-pressed');
+          if (!ariaPressedExists && !positiveLabelMatch(ariaLabel)) continue;
 
           // 5. NIE może mieć href ani onclick z href
           const hasHref = buttonParent.hasAttribute('href') ||
@@ -1861,6 +1875,17 @@ class AutomationManager extends EventEmitter {
           const text = buttonParent.textContent || '';
           const hasNumber = /\d/.test(text);
           if (hasNumber) continue;
+
+          // Pomiń elementy otwierające dialog (często lista reakcji)
+          const ariaLabel = likeBtn.getAttribute('aria-label') || buttonParent.getAttribute('aria-label') || '';
+          const hasDialogPopup = buttonParent.getAttribute('aria-haspopup') === 'dialog' ||
+                                  likeBtn.getAttribute('aria-haspopup') === 'dialog';
+          if (hasDialogPopup) continue;
+
+          // Wymagaj pozytywnego dopasowania etykiety lub aria-pressed
+          const ariaPressedExists = buttonParent.hasAttribute('aria-pressed') || likeBtn.hasAttribute('aria-pressed');
+          const hasPositiveLabel = positiveLabelMatch(ariaLabel);
+          if (!ariaPressedExists && !hasPositiveLabel) continue;
 
           // NIE może mieć href
           const hasHref = buttonParent.hasAttribute('href') ||
