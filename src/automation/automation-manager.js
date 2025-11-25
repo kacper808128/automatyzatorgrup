@@ -633,6 +633,7 @@ class AutomationManager extends EventEmitter {
    * @param {Object} proxy - { host, port, username?, password? }
    */
   async testProxy(proxy) {
+    const { chromium } = require('playwright');
     let browser = null;
     let context = null;
 
@@ -645,7 +646,7 @@ class AutomationManager extends EventEmitter {
       }
 
       // Uruchom przeglądarkę z proxy
-      browser = await this.playwright.chromium.launch({
+      browser = await chromium.launch({
         headless: true,
         proxy: {
           server: proxyConfig
