@@ -675,18 +675,56 @@ class AutomationManager extends EventEmitter {
         timeout: 15000
       });
 
-      const content = await page.textContent('body');
-      const data = JSON.parse(content);
+      // Poczekaj na załadowanie treści
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+
+      // Pobierz zawartość strony
+      const content = await page.textContent('body').catch(() => '');
+
+      // Sprawdź czy to jest JSON
+      let data;
+      try {
+        data = JSON.parse(content);
+      } catch (jsonError) {
+        // Jeśli nie JSON, sprawdź czy to HTML (błąd proxy)
+        const isHTML = content.trim().startsWith('<');
+        await page.close();
+        await context.close();
+        await browser.close();
+
+        if (isHTML || content.length > 200) {
+          return {
+            success: false,
+            error: 'Proxy zwraca HTML zamiast danych',
+            message: `Proxy może wymagać uwierzytelnienia lub jest zablokowane. Odpowiedź: ${content.substring(0, 100)}...`
+          };
+        }
+
+        return {
+          success: false,
+          error: 'Nieprawidłowa odpowiedź',
+          message: `Proxy zwróciło nieprawidłowe dane: "${content.substring(0, 100)}"`
+        };
+      }
 
       await page.close();
       await context.close();
       await browser.close();
 
-      return {
-        success: true,
-        ip: data.ip,
-        message: `Proxy działa! IP: ${data.ip}`
-      };
+      // Sprawdź czy odpowiedź zawiera IP
+      if (data && data.ip) {
+        return {
+          success: true,
+          ip: data.ip,
+          message: `Proxy działa! IP: ${data.ip}`
+        };
+      } else {
+        return {
+          success: false,
+          error: 'Brak IP w odpowiedzi',
+          message: `Proxy odpowiedziało, ale bez IP: ${JSON.stringify(data)}`
+        };
+      }
     } catch (error) {
       // Zamknij zasoby w razie błędu
       try {
