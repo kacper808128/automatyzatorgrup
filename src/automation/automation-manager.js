@@ -1788,11 +1788,13 @@ class AutomationManager extends EventEmitter {
           const buttonParent = el.closest('[role="button"]') || (el.getAttribute('role') === 'button' ? el : null);
           if (!buttonParent) continue;
 
-          // 2. NIE może być linkiem
+          // 2. NIE może być linkiem lub wewnątrz linka
           const isLink = el.tagName === 'A' ||
+                        buttonParent.tagName === 'A' ||
                         el.matches('a[role="link"]') ||
                         el.closest('a[role="link"]') ||
-                        el.closest('a[href]');
+                        el.closest('a[href]') ||
+                        buttonParent.closest('a[href]');
           if (isLink) continue;
 
           // 3. NIE może zawierać liczby (licznik reakcji)
@@ -1801,15 +1803,26 @@ class AutomationManager extends EventEmitter {
           if (hasNumber) continue;
 
           // 4. aria-label NIE może wskazywać na listę
-          const ariaLabel = el.getAttribute('aria-label') || '';
+          const ariaLabel = el.getAttribute('aria-label') || buttonParent.getAttribute('aria-label') || '';
           const isReactionList = ariaLabel.toLowerCase().includes('see who reacted') ||
                                 ariaLabel.toLowerCase().includes('zobacz kto zareag') ||
-                                ariaLabel.toLowerCase().includes('who reacted');
+                                ariaLabel.toLowerCase().includes('who reacted') ||
+                                ariaLabel.toLowerCase().includes('view') ||
+                                ariaLabel.toLowerCase().includes('zobacz');
           if (isReactionList) continue;
 
-          // 5. NIE może mieć href
-          const hasHref = buttonParent.hasAttribute('href');
+          // 5. NIE może mieć href ani onclick z href
+          const hasHref = buttonParent.hasAttribute('href') ||
+                         el.hasAttribute('href') ||
+                         (buttonParent.getAttribute('onclick') || '').includes('href');
           if (hasHref) continue;
+
+          // 6. Przycisk musi być widoczny i klikalny
+          const rect = buttonParent.getBoundingClientRect();
+          const isVisible = rect.width > 0 && rect.height > 0 &&
+                          window.getComputedStyle(buttonParent).visibility !== 'hidden' &&
+                          window.getComputedStyle(buttonParent).display !== 'none';
+          if (!isVisible) continue;
 
           // Znaleziono właściwy przycisk!
           buttonParent.setAttribute('data-reaction-button', 'true');
@@ -1826,10 +1839,29 @@ class AutomationManager extends EventEmitter {
           // Sprawdź czy już nie oznaczyliśmy
           if (buttonParent.hasAttribute('data-reaction-button')) continue;
 
+          // NIE może być linkiem lub wewnątrz linka
+          const isLink = likeBtn.tagName === 'A' ||
+                        buttonParent.tagName === 'A' ||
+                        likeBtn.closest('a[href]') ||
+                        buttonParent.closest('a[href]');
+          if (isLink) continue;
+
           // Sprawdź czy nie ma liczby
           const text = buttonParent.textContent || '';
           const hasNumber = /\d/.test(text);
           if (hasNumber) continue;
+
+          // NIE może mieć href
+          const hasHref = buttonParent.hasAttribute('href') ||
+                         likeBtn.hasAttribute('href');
+          if (hasHref) continue;
+
+          // Musi być widoczny
+          const rect = buttonParent.getBoundingClientRect();
+          const isVisible = rect.width > 0 && rect.height > 0 &&
+                          window.getComputedStyle(buttonParent).visibility !== 'hidden' &&
+                          window.getComputedStyle(buttonParent).display !== 'none';
+          if (!isVisible) continue;
 
           buttonParent.setAttribute('data-reaction-button', 'true');
           buttons.push(true);
@@ -1865,8 +1897,53 @@ class AutomationManager extends EventEmitter {
 
           if (isReacted) continue;
 
+          // Przewiń do widoku i poczekaj
+          await btn.scrollIntoViewIfNeeded();
+          await randomDelay(300, 500);
+
           // Kliknij reakcję
           await btn.click();
+          await randomDelay(500, 800);
+
+          // WAŻNE: Sprawdź czy nie otworzyło się okno modalne z listą reakcji
+          const modalOpened = await page.evaluate(() => {
+            const modals = document.querySelectorAll('[role="dialog"]');
+            for (const modal of modals) {
+              const rect = modal.getBoundingClientRect();
+              const isVisible = rect.width > 0 && rect.height > 0;
+              if (!isVisible) continue;
+
+              // Sprawdź czy to modal z listą reakcji
+              const text = modal.textContent || '';
+              const isReactionModal = text.includes('All') ||
+                                     text.includes('Wszyscy') ||
+                                     text.includes('Like') ||
+                                     text.includes('Lubię to') ||
+                                     modal.querySelector('[aria-label*="Close"]');
+
+              if (isReactionModal) {
+                // Znajdź przycisk zamykający
+                const closeBtn = modal.querySelector('[aria-label*="Close"], [aria-label*="Zamknij"]');
+                if (closeBtn) {
+                  closeBtn.click();
+                  console.log('DEBUG: Zamknięto modal z listą reakcji');
+                  return true;
+                }
+                // Alternatywnie kliknij Escape
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27 }));
+                return true;
+              }
+            }
+            return false;
+          });
+
+          if (modalOpened) {
+            this.addLog(`${logPrefix} ⚠️ Zamknięto modal reakcji`, 'warning');
+            await randomDelay(500, 1000);
+            // Nie zwiększaj reactedCount bo kliknęliśmy w zły element
+            continue;
+          }
+
           reactedCount++;
           this.addLog(`${logPrefix} ❤️ Reakcja ${reactedCount}/${count}`, 'success');
           await randomDelay(1000, 2000);
