@@ -668,48 +668,74 @@ class AutomationManager extends EventEmitter {
 
       const page = await context.newPage();
 
+      // Przechwytujemy response bezpośrednio - ipify zwraca plain text JSON, nie HTML
+      let responseBody = null;
+
+      page.on('response', async (response) => {
+        if (response.url().includes('ipify.org') && response.status() === 200) {
+          try {
+            responseBody = await response.text();
+          } catch (e) {
+            // Ignoruj błędy odczytu
+          }
+        }
+      });
+
       // Użyj HTTP zamiast HTTPS dla testowania proxy (unikamy problemów z tunelem)
-      // Jeśli HTTP działa, to HTTPS też będzie działać w normalnej przeglądarce
       await page.goto('http://api.ipify.org?format=json', {
         waitUntil: 'domcontentloaded',
         timeout: 15000
       });
 
-      // Poczekaj na załadowanie treści
-      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      // Poczekaj na response
+      await page.waitForTimeout(2000);
 
-      // Pobierz zawartość strony
-      const content = await page.textContent('body').catch(() => '');
+      // Jeśli nie złapaliśmy response, spróbuj pobrać z DOM
+      if (!responseBody) {
+        // Najpierw spróbuj innerText
+        responseBody = await page.evaluate(() => document.body.innerText).catch(() => '');
+
+        // Jeśli nadal puste, spróbuj innerHTML
+        if (!responseBody || responseBody.trim() === '') {
+          responseBody = await page.evaluate(() => document.body.innerHTML).catch(() => '');
+        }
+      }
+
+      await page.close();
+      await context.close();
+      await browser.close();
+
+      // Sprawdź czy mamy jakąkolwiek odpowiedź
+      if (!responseBody || responseBody.trim() === '') {
+        return {
+          success: false,
+          error: 'Pusta odpowiedź',
+          message: 'Proxy zwraca pustą odpowiedź - może być zablokowane lub nie obsługuje HTTP'
+        };
+      }
 
       // Sprawdź czy to jest JSON
       let data;
       try {
-        data = JSON.parse(content);
+        data = JSON.parse(responseBody.trim());
       } catch (jsonError) {
         // Jeśli nie JSON, sprawdź czy to HTML (błąd proxy)
-        const isHTML = content.trim().startsWith('<');
-        await page.close();
-        await context.close();
-        await browser.close();
+        const isHTML = responseBody.trim().startsWith('<');
 
-        if (isHTML || content.length > 200) {
+        if (isHTML || responseBody.length > 200) {
           return {
             success: false,
             error: 'Proxy zwraca HTML zamiast danych',
-            message: `Proxy może wymagać uwierzytelnienia lub jest zablokowane. Odpowiedź: ${content.substring(0, 100)}...`
+            message: `Proxy może wymagać uwierzytelnienia lub jest zablokowane. Odpowiedź: ${responseBody.substring(0, 100)}...`
           };
         }
 
         return {
           success: false,
           error: 'Nieprawidłowa odpowiedź',
-          message: `Proxy zwróciło nieprawidłowe dane: "${content.substring(0, 100)}"`
+          message: `Proxy zwróciło nieprawidłowe dane: "${responseBody.substring(0, 100)}"`
         };
       }
-
-      await page.close();
-      await context.close();
-      await browser.close();
 
       // Sprawdź czy odpowiedź zawiera IP
       if (data && data.ip) {
