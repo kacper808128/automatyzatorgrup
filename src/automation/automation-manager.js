@@ -1902,27 +1902,39 @@ class AutomationManager extends EventEmitter {
         }
 
         try {
-          // Sprawdź czy już nie zareagowaliśmy LUB czy to przycisk "Usuń reakcję"
+          // Sprawdź czy już nie zareagowaliśmy LUB czy to przycisk "Usuń reakcję" / "Zmień reakcję"
           const beforeClick = await btn.evaluate(el => {
             const parent = el.closest('[role="button"]') || el;
             const ariaLabel = parent.getAttribute('aria-label') || '';
+            const lowerLabel = ariaLabel.toLowerCase();
+
+            // Sprawdź czy zawiera liczby (np. "Lubię to!: 9 osób")
+            const hasNumbers = /\d/.test(ariaLabel);
+
             return {
               ariaPressed: parent.getAttribute('aria-pressed'),
               ariaLabel: ariaLabel,
-              isRemove: ariaLabel.toLowerCase().includes('usuń') ||
-                       ariaLabel.toLowerCase().includes('remove') ||
-                       ariaLabel.toLowerCase().includes('unlike')
+              isRemove: lowerLabel.includes('usuń') ||
+                       lowerLabel.includes('remove') ||
+                       lowerLabel.includes('unlike') ||
+                       lowerLabel.includes('zmień') ||
+                       lowerLabel.includes('change'),
+              hasNumbers: hasNumbers
             };
           }).catch(err => {
             // Element zniknął z DOM
             this.addLog(`${logPrefix} ⚠️ Element zniknął z DOM (${err.message})`, 'warning');
-            return { ariaPressed: 'skip', isRemove: false, ariaLabel: 'unknown' };
+            return { ariaPressed: 'skip', isRemove: false, hasNumbers: false, ariaLabel: 'unknown' };
           });
 
           if (beforeClick.ariaPressed === 'skip') continue;
           if (beforeClick.ariaPressed === 'true') continue;
           if (beforeClick.isRemove) {
             this.addLog(`${logPrefix} ⏭️ Pomijam - post już ma reakcję (${beforeClick.ariaLabel})`, 'info');
+            continue;
+          }
+          if (beforeClick.hasNumbers) {
+            this.addLog(`${logPrefix} ⏭️ Pomijam - to link do listy reakcji (${beforeClick.ariaLabel})`, 'info');
             continue;
           }
 
@@ -2477,6 +2489,9 @@ class AutomationManager extends EventEmitter {
         // Polskie i angielskie wersje komunikatów o ograniczeniach
         const restrictionKeywords = [
           'ograniczeni',
+          'ograniczamy liczbę',
+          'liczbę publikowanych',
+          'chronić społeczność',
           'temporarily blocked',
           'tymczasowo zablokowa',
           'can\'t post',
@@ -2486,6 +2501,7 @@ class AutomationManager extends EventEmitter {
           'coś poszło nie tak',
           'try again later',
           'spróbuj później',
+          'spróbuj ponownie',
           'action blocked',
           'akcja zablokowana',
           'posting too',
@@ -2500,7 +2516,9 @@ class AutomationManager extends EventEmitter {
           'violat', // violation, naruszenie
           'naruszen',
           'against our',
-          'sprzeczn'
+          'sprzeczn',
+          'rate limit',
+          'limit'
         ];
 
         // Znajdź WSZYSTKIE modale
@@ -2517,7 +2535,8 @@ class AutomationManager extends EventEmitter {
           const text = modal.textContent || modal.innerText || '';
           const lowerText = text.toLowerCase();
 
-          // WAŻNE: Pomiń modal "Utwórz post" (zawiera treść posta użytkownika)
+          // WAŻNE: Modal "Utwórz post" zawiera treść posta użytkownika
+          // Sprawdzaj TYLKO w alertach/error messages, NIE w textarea z postem
           const heading = modal.querySelector('[role="heading"], h2, h3, [aria-label*="Create"], [aria-label*="Utwórz"]');
           const headingText = heading ? heading.textContent.toLowerCase() : '';
           const isCreatePostModal = headingText.includes('utwórz post') ||
@@ -2527,8 +2546,36 @@ class AutomationManager extends EventEmitter {
                                    headingText.includes('publikuj');
 
           if (isCreatePostModal) {
-            console.log(`DEBUG: Modal ${i + 1} to modal tworzenia posta, pomijam`);
-            continue; // To nie jest błąd, to normalny modal publikowania
+            console.log(`DEBUG: Modal ${i + 1} to modal tworzenia posta, sprawdzam tylko alerty wewnątrz`);
+
+            // W modalu tworzenia posta sprawdzaj TYLKO w alertach/error divs, NIE w całym tekście
+            const modalAlerts = modal.querySelectorAll(
+              '[role="alert"], [role="alertdialog"], [role="status"], ' +
+              'div[style*="color: rgb(244"], div[style*="color:rgb(244"], ' + // Czerwony kolor FB
+              'div[style*="color: rgb(176"], div[style*="color:rgb(176"]'  // Pomarańczowy warning FB
+            );
+
+            console.log(`DEBUG: Znaleziono ${modalAlerts.length} alertów w modalu tworzenia posta`);
+
+            for (const alert of modalAlerts) {
+              const alertText = (alert.textContent || '').toLowerCase();
+              if (alertText.length > 15) { // Min 15 znaków (nie puste)
+                for (const keyword of restrictionKeywords) {
+                  if (alertText.includes(keyword)) {
+                    console.log(`DEBUG: WYKRYTO OGRANICZENIE W MODALU TWORZENIA POSTA: "${keyword}"`);
+                    return {
+                      detected: true,
+                      message: alert.textContent.substring(0, 400),
+                      keyword: keyword,
+                      source: 'createPostModalAlert',
+                      fullText: alert.textContent
+                    };
+                  }
+                }
+              }
+            }
+
+            continue; // Nie sprawdzaj całego tekstu modala (tam jest treść posta)
           }
 
           console.log(`DEBUG: Modal ${i + 1} (${rect.width}x${rect.height}): "${text.substring(0, 100)}..."`);
