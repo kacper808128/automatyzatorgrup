@@ -38,6 +38,7 @@ class AutomationManager extends EventEmitter {
     this.page = null;
     this.isRunning = false;
     this.isPaused = false;
+    this.shouldStop = false; // Flaga do przerwania automatyzacji
     this.currentTask = null;
     this.logs = [];
     this.proxyManager = new ProxyManager();
@@ -1766,6 +1767,12 @@ class AutomationManager extends EventEmitter {
    */
   async reactToGroupPosts(page, logPrefix, count = 2) {
     try {
+      // Sprawdź czy nie zatrzymano
+      if (!this.isRunning) {
+        this.addLog(`${logPrefix} ⏹️ Pomijam reakcje - automatyzacja zatrzymana`, 'warning');
+        return 0;
+      }
+
       this.addLog(`${logPrefix} 👍 Daję reakcje na posty w grupie...`, 'info');
 
       // Scrolluj trochę żeby załadować posty
@@ -1888,6 +1895,12 @@ class AutomationManager extends EventEmitter {
 
       let reactedCount = 0;
       for (const btn of toReact) {
+        // Sprawdź czy nie zatrzymano
+        if (!this.isRunning) {
+          this.addLog(`${logPrefix} ⏹️ Przerywam reakcje - automatyzacja zatrzymana`, 'warning');
+          break;
+        }
+
         try {
           // Sprawdź czy już nie zareagowaliśmy
           const isReacted = await btn.evaluate(el => {
@@ -1901,54 +1914,93 @@ class AutomationManager extends EventEmitter {
           await btn.scrollIntoViewIfNeeded();
           await randomDelay(300, 500);
 
-          // Kliknij reakcję
-          await btn.click();
-          await randomDelay(500, 800);
+          // Użyj HumanMouse do naturalnego kliku (szybki, nie długi)
+          const humanMouse = new HumanMouse(page);
+          await humanMouse.clickElement(btn, { curve: 'bezier' });
+          await randomDelay(800, 1200);
 
-          // WAŻNE: Sprawdź czy nie otworzyło się okno modalne z listą reakcji
-          const modalOpened = await page.evaluate(() => {
-            const modals = document.querySelectorAll('[role="dialog"]');
-            for (const modal of modals) {
-              const rect = modal.getBoundingClientRect();
-              const isVisible = rect.width > 0 && rect.height > 0;
-              if (!isVisible) continue;
-
-              // Sprawdź czy to modal z listą reakcji
-              const text = modal.textContent || '';
-              const isReactionModal = text.includes('All') ||
-                                     text.includes('Wszyscy') ||
-                                     text.includes('Like') ||
-                                     text.includes('Lubię to') ||
-                                     modal.querySelector('[aria-label*="Close"]');
-
-              if (isReactionModal) {
-                // Znajdź przycisk zamykający
-                const closeBtn = modal.querySelector('[aria-label*="Close"], [aria-label*="Zamknij"]');
-                if (closeBtn) {
-                  closeBtn.click();
-                  console.log('DEBUG: Zamknięto modal z listą reakcji');
-                  return true;
-                }
-                // Alternatywnie kliknij Escape
-                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27 }));
-                return true;
-              }
-            }
-            return false;
+          // SPRAWDŹ CZY LIKE SIĘ UDAŁ (zmiana aria-label)
+          const likeSucceeded = await btn.evaluate(el => {
+            const parent = el.closest('[role="button"]') || el;
+            const newLabel = (parent.getAttribute('aria-label') || '').toLowerCase();
+            // Jeśli zmienił się na "Unlike" / "Cofnij" = sukces
+            return newLabel.includes('unlike') ||
+                   newLabel.includes('cofnij') ||
+                   newLabel.includes('remove') ||
+                   parent.getAttribute('aria-pressed') === 'true';
           });
 
-          if (modalOpened) {
-            this.addLog(`${logPrefix} ⚠️ Zamknięto modal reakcji`, 'warning');
-            await randomDelay(500, 1000);
-            // Nie zwiększaj reactedCount bo kliknęliśmy w zły element
+          if (likeSucceeded) {
+            reactedCount++;
+            this.addLog(`${logPrefix} ❤️ Like ${reactedCount}/${count} (bezpośredni)`, 'success');
+            await randomDelay(1500, 2500);
             continue;
           }
 
-          reactedCount++;
-          this.addLog(`${logPrefix} ❤️ Reakcja ${reactedCount}/${count}`, 'success');
-          await randomDelay(1000, 2000);
+          // Jeśli nie udało się bezpośrednio, sprawdź czy otworzyło się menu reakcji (picker)
+          const pickerHandled = await page.evaluate(() => {
+            // Szukaj reaction pickera (nie pełnego modala, ale małe popup menu)
+            const picker = document.querySelector('[role="dialog"][aria-label*="React"], [role="toolbar"][aria-label*="React"]') ||
+                          Array.from(document.querySelectorAll('[role="dialog"]')).find(d => {
+                            const rect = d.getBoundingClientRect();
+                            if (rect.width === 0 || rect.height === 0) return false;
+                            // Picker jest mały (max ~400px szerokości), lista reakcji jest duża
+                            if (rect.width > 500) return false;
+                            const text = d.textContent || '';
+                            return text.includes('Like') || text.includes('Lubię') ||
+                                   text.includes('Love') || text.includes('Haha');
+                          });
+
+            if (picker) {
+              console.log('DEBUG: Znaleziono reaction picker, wybieram Like');
+              // Szukaj przycisku Like w pickerze
+              const likeInPicker = picker.querySelector('[aria-label*="Like"], [aria-label*="Lubię to"]');
+              if (likeInPicker) {
+                likeInPicker.click();
+                return 'selected';
+              }
+              // Jeśli nie znaleziono, zamknij picker
+              document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27 }));
+              return 'closed';
+            }
+
+            // Sprawdź czy to duży modal z listą osób (nie picker)
+            const reactionListModal = Array.from(document.querySelectorAll('[role="dialog"]')).find(d => {
+              const rect = d.getBoundingClientRect();
+              if (rect.width === 0 || rect.height === 0) return false;
+              if (rect.width < 500) return false; // Za mały na listę osób
+              const text = d.textContent || '';
+              return text.includes('All') || text.includes('Wszyscy');
+            });
+
+            if (reactionListModal) {
+              console.log('DEBUG: Otworzyło się okno z listą reakcji (nie picker), zamykam');
+              const closeBtn = reactionListModal.querySelector('[aria-label*="Close"], [aria-label*="Zamknij"]');
+              if (closeBtn) closeBtn.click();
+              else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27 }));
+              return 'wrongModal';
+            }
+
+            return false;
+          });
+
+          if (pickerHandled === 'selected') {
+            reactedCount++;
+            this.addLog(`${logPrefix} ❤️ Like ${reactedCount}/${count} (przez picker)`, 'success');
+            await randomDelay(1500, 2500);
+          } else if (pickerHandled === 'wrongModal') {
+            this.addLog(`${logPrefix} ⚠️ Kliknięto w listę reakcji (nie przycisk)`, 'warning');
+            await randomDelay(800, 1200);
+          } else if (pickerHandled === 'closed') {
+            this.addLog(`${logPrefix} ⚠️ Picker otwarty ale nie znaleziono Like`, 'warning');
+            await randomDelay(800, 1200);
+          } else {
+            this.addLog(`${logPrefix} ⚠️ Reakcja zawiodła (brak pickera)`, 'warning');
+            await randomDelay(500, 1000);
+          }
+
         } catch (e) {
-          // Ignoruj błędy pojedynczych reakcji
+          this.addLog(`${logPrefix} ⚠️ Błąd reakcji: ${e.message}`, 'warning');
         }
       }
 
@@ -2350,9 +2402,67 @@ class AutomationManager extends EventEmitter {
       }
       
       this.addLog(`${logPrefix} ✅ Kliknięto publikuj`, 'success');
-      
-      await randomDelay(3000, 4000);
-      
+
+      await randomDelay(3000, 5000);
+
+      // =============================================
+      // SPRAWDŹ CZY FACEBOOK NIE POKAZAŁ OGRANICZENIA
+      // =============================================
+      const restriction = await page.evaluate(() => {
+        // Szukaj komunikatu o ograniczeniu w modalu
+        const modal = document.querySelector('[role="dialog"]');
+        if (!modal) return null;
+
+        const text = modal.textContent || modal.innerText || '';
+        const lowerText = text.toLowerCase();
+
+        // Polskie i angielskie wersje komunikatów o ograniczeniach
+        const restrictionKeywords = [
+          'ograniczeni',
+          'temporarily blocked',
+          'tymczasowo zablokowa',
+          'can\'t post',
+          'nie możesz publikować',
+          'nie można opublikować',
+          'something went wrong',
+          'coś poszło nie tak',
+          'try again later',
+          'spróbuj później',
+          'action blocked',
+          'akcja zablokowana',
+          'posting too',
+          'zbyt wiele',
+          'you\'re posting',
+          'publikujesz zbyt'
+        ];
+
+        for (const keyword of restrictionKeywords) {
+          if (lowerText.includes(keyword)) {
+            // Znajdź dokładny tekst komunikatu (pierwsze 200 znaków)
+            const errorDiv = modal.querySelector('[role="heading"]') ||
+                            modal.querySelector('h2') ||
+                            modal.querySelector('div[style*="font-weight"]');
+            const message = errorDiv ? errorDiv.textContent.substring(0, 200) : text.substring(0, 200);
+            return {
+              detected: true,
+              message: message.trim()
+            };
+          }
+        }
+
+        return null;
+      });
+
+      if (restriction && restriction.detected) {
+        this.addLog(`${logPrefix} 🚫 FACEBOOK OGRANICZENIE WYKRYTE!`, 'error');
+        this.addLog(`${logPrefix} Komunikat: ${restriction.message}`, 'error');
+
+        // Oznacz konto jako zbanowane
+        this.activityLimiter.markAsBanned();
+
+        throw new Error(`Facebook ograniczył postowanie: ${restriction.message}`);
+      }
+
       this.addLog(`${logPrefix} ✅ Post opublikowany pomyślnie!`, 'success');
 
       // =============================================
