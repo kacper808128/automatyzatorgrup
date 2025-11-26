@@ -1902,22 +1902,40 @@ class AutomationManager extends EventEmitter {
         }
 
         try {
-          // Sprawdź czy już nie zareagowaliśmy
+          // Sprawdź czy już nie zareagowaliśmy LUB czy to przycisk "Usuń reakcję"
           const beforeClick = await btn.evaluate(el => {
             const parent = el.closest('[role="button"]') || el;
+            const ariaLabel = parent.getAttribute('aria-label') || '';
             return {
               ariaPressed: parent.getAttribute('aria-pressed'),
-              ariaLabel: parent.getAttribute('aria-label')
+              ariaLabel: ariaLabel,
+              isRemove: ariaLabel.toLowerCase().includes('usuń') ||
+                       ariaLabel.toLowerCase().includes('remove') ||
+                       ariaLabel.toLowerCase().includes('unlike')
             };
+          }).catch(err => {
+            // Element zniknął z DOM
+            this.addLog(`${logPrefix} ⚠️ Element zniknął z DOM (${err.message})`, 'warning');
+            return { ariaPressed: 'skip', isRemove: false, ariaLabel: 'unknown' };
           });
 
+          if (beforeClick.ariaPressed === 'skip') continue;
           if (beforeClick.ariaPressed === 'true') continue;
+          if (beforeClick.isRemove) {
+            this.addLog(`${logPrefix} ⏭️ Pomijam - post już ma reakcję (${beforeClick.ariaLabel})`, 'info');
+            continue;
+          }
 
           this.addLog(`${logPrefix} 🖱️ Klikam przycisk reakcji (${beforeClick.ariaLabel})`, 'info');
 
-          // Przewiń do widoku i poczekaj
-          await btn.scrollIntoViewIfNeeded();
-          await randomDelay(300, 500);
+          // Przewiń do widoku i poczekaj (obsługa błędów DOM)
+          try {
+            await btn.scrollIntoViewIfNeeded();
+            await randomDelay(300, 500);
+          } catch (scrollErr) {
+            this.addLog(`${logPrefix} ⚠️ Scroll failed - element detached (${scrollErr.message})`, 'warning');
+            continue; // Skip ten przycisk
+          }
 
           // PRÓBA 1: Użyj HumanMouse do naturalnego kliku
           try {
@@ -2499,6 +2517,20 @@ class AutomationManager extends EventEmitter {
           const text = modal.textContent || modal.innerText || '';
           const lowerText = text.toLowerCase();
 
+          // WAŻNE: Pomiń modal "Utwórz post" (zawiera treść posta użytkownika)
+          const heading = modal.querySelector('[role="heading"], h2, h3, [aria-label*="Create"], [aria-label*="Utwórz"]');
+          const headingText = heading ? heading.textContent.toLowerCase() : '';
+          const isCreatePostModal = headingText.includes('utwórz post') ||
+                                   headingText.includes('create post') ||
+                                   headingText.includes('create a post') ||
+                                   headingText.includes('publishing') ||
+                                   headingText.includes('publikuj');
+
+          if (isCreatePostModal) {
+            console.log(`DEBUG: Modal ${i + 1} to modal tworzenia posta, pomijam`);
+            continue; // To nie jest błąd, to normalny modal publikowania
+          }
+
           console.log(`DEBUG: Modal ${i + 1} (${rect.width}x${rect.height}): "${text.substring(0, 100)}..."`);
 
           for (const keyword of restrictionKeywords) {
@@ -2524,21 +2556,21 @@ class AutomationManager extends EventEmitter {
           }
         }
 
-        // Sprawdź też całą stronę (nie tylko modale)
-        const bodyText = (document.body.textContent || '').toLowerCase();
-        for (const keyword of restrictionKeywords) {
-          if (bodyText.includes(keyword)) {
-            console.log(`DEBUG: WYKRYTO SŁOWO NA STRONIE: "${keyword}"`);
-            // Znajdź element zawierający to słowo
-            const allDivs = Array.from(document.querySelectorAll('div, span'));
-            for (const div of allDivs) {
-              const divText = (div.textContent || '').toLowerCase();
-              if (divText.includes(keyword) && divText.length < 500) {
+        // Sprawdź alerty/bannery (nie całą stronę - może być false positive z treścią posta)
+        const alerts = document.querySelectorAll('[role="alert"], [role="alertdialog"], [role="banner"]');
+        console.log(`DEBUG: Znaleziono ${alerts.length} alertów/bannerów`);
+
+        for (const alert of alerts) {
+          const alertText = (alert.textContent || '').toLowerCase();
+          if (alertText.length > 10) { // Tylko niepuste alerty
+            for (const keyword of restrictionKeywords) {
+              if (alertText.includes(keyword)) {
+                console.log(`DEBUG: WYKRYTO SŁOWO W ALERCIE: "${keyword}"`);
                 return {
                   detected: true,
-                  message: div.textContent.substring(0, 300),
+                  message: alert.textContent.substring(0, 300),
                   keyword: keyword,
-                  source: 'body'
+                  source: 'alert'
                 };
               }
             }
