@@ -1300,47 +1300,71 @@ class AutomationManager extends EventEmitter {
     this.addLog(`\n✅ Konta z ważnymi cookies: ${validAccounts.length}/${accounts.length}`, 'success');
 
     // =============================================
-    // ROUND-ROBIN: Rozdziel posty między konta
+    // KOLEJKA: Współdzielona kolejka postów
     // =============================================
-    this.addLog(`\n🔄 Rozdzielam posty metodą round-robin...`, 'info');
+    this.addLog(`\n📋 Tworzę wspólną kolejkę postów...`, 'info');
 
-    // Round-robin zamiast chunków - każde konto dostaje posty na przemian
-    const accountPostsMap = new Map();
-    validAccounts.forEach(acc => accountPostsMap.set(acc.id, []));
+    // Współdzielona kolejka - wszystkie posty w jednym miejscu
+    const postQueue = [...posts]; // Kopia wszystkich postów
+    const stoppedAccounts = new Set(); // Zestaw ID zatrzymanych kont
+    let globalStopFlag = false; // Flag do zatrzymania wszystkich
 
-    for (let i = 0; i < posts.length; i++) {
-      const accountIndex = i % validAccounts.length;
-      const account = validAccounts[accountIndex];
-      accountPostsMap.get(account.id).push(posts[i]);
-    }
+    // Funkcja pobierająca post z kolejki (atomowa operacja)
+    const getNextPost = () => {
+      if (globalStopFlag || postQueue.length === 0) return null;
+      return postQueue.shift();
+    };
+
+    // Funkcja zwracająca post do kolejki
+    const returnPostToQueue = (post) => {
+      postQueue.unshift(post); // Na początek kolejki
+    };
+
+    // Funkcja zatrzymująca konto
+    const stopAccount = (accountId, accountName, reason) => {
+      if (stoppedAccounts.has(accountId)) return; // Już zatrzymane
+
+      stoppedAccounts.add(accountId);
+      this.addLog(`❌ KONTO ZATRZYMANE: ${accountName} - ${reason}`, 'error');
+
+      if (stoppedAccounts.size > 2) {
+        globalStopFlag = true;
+        this.isRunning = false;
+        this.addLog(`\n🛑 STOP AUTOMATYZACJI - więcej niż 2 konta zatrzymane (${stoppedAccounts.size} kont)`, 'error');
+        this.addLog(`   Zatrzymane konta: ${Array.from(stoppedAccounts).join(', ')}`, 'error');
+      }
+    };
 
     const accountTasks = [];
     for (let i = 0; i < validAccounts.length; i++) {
       const account = validAccounts[i];
-      const accountPosts = accountPostsMap.get(account.id);
 
-      if (accountPosts.length > 0) {
-        // Pobierz proxy przypisane do konta
-        const accountProxy = account.proxyId
-          ? this.proxyList.find(p => p.id === account.proxyId)
-          : null;
+      // Pobierz proxy przypisane do konta
+      const accountProxy = account.proxyId
+        ? this.proxyList.find(p => p.id === account.proxyId)
+        : null;
 
-        accountTasks.push({
-          accountIndex: i + 1,
-          accountId: account.id,
-          accountName: account.name || account.email || `Konto #${account.id}`,
-          cookies: account.cookies,
-          posts: accountPosts,
-          proxy: accountProxy,  // Proxy per konto
-          cookieValidation: account.cookieValidation
-        });
+      accountTasks.push({
+        accountIndex: i + 1,
+        accountId: account.id,
+        accountName: account.name || account.email || `Konto #${account.id}`,
+        cookies: account.cookies,
+        posts: null, // Brak przydzielonych postów - będą pobierane z kolejki
+        proxy: accountProxy,  // Proxy per konto
+        cookieValidation: account.cookieValidation,
+        // Przekaż funkcje do zarządzania kolejką
+        getNextPost,
+        returnPostToQueue,
+        stopAccount,
+        stoppedAccounts,
+        getGlobalStopFlag: () => globalStopFlag
+      });
 
-        const proxyInfo = accountProxy ? `🌐 ${accountProxy.name || accountProxy.host}` : '🔓 bez proxy';
-        this.addLog(`🔹 ${account.name || `Konto #${i + 1}`}: ${accountPosts.length} postów (round-robin) | ${proxyInfo}`, 'info');
-      }
+      const proxyInfo = accountProxy ? `🌐 ${accountProxy.name || accountProxy.host}` : '🔓 bez proxy';
+      this.addLog(`🔹 ${account.name || `Konto #${i + 1}`}: gotowe do pracy | ${proxyInfo}`, 'info');
     }
 
-    this.addLog(`\n✅ Podział zakończony, uruchamiam ${accountTasks.length} instancji...`, 'success');
+    this.addLog(`\n✅ Utworzono kolejkę z ${posts.length} postami, uruchamiam ${accountTasks.length} instancji...`, 'success');
 
     // =============================================
     // MAX 5 KONT JEDNOCZEŚNIE - kontrola przepustowości
@@ -1392,7 +1416,7 @@ class AutomationManager extends EventEmitter {
               accountName: task.accountName,
               successfulPosts: [],
               failedPosts: [],
-              totalAttempted: task.posts.length,
+              totalAttempted: 0,
               criticalError: error.message
             });
           }
@@ -1464,11 +1488,13 @@ class AutomationManager extends EventEmitter {
       this.addLog(`   • Kont użytych: ${accountTasks.length}`, 'info');
       this.addLog(`   • Kont z sukcesem: ${successCount}`, 'success');
       this.addLog(`   • Kont z błędami: ${failedAccounts}`, failedAccounts > 0 ? 'warning' : 'info');
+      this.addLog(`   • Kont zatrzymanych: ${stoppedAccounts.size}`, stoppedAccounts.size > 0 ? 'error' : 'info');
 
       // Statystyki postów
       this.addLog(`\n📝 POSTY:`, 'info');
       this.addLog(`   • Opublikowane pomyślnie: ${totalSuccessfulPosts}`, 'success');
       this.addLog(`   • Błędy publikacji: ${totalFailedPosts}`, totalFailedPosts > 0 ? 'warning' : 'info');
+      this.addLog(`   • Pozostało w kolejce: ${postQueue.length}`, postQueue.length > 0 ? 'warning' : 'info');
       this.addLog(`   • Całkowita liczba prób: ${totalSuccessfulPosts + totalFailedPosts}`, 'info');
       if (totalSuccessfulPosts + totalFailedPosts > 0) {
         const successRate = ((totalSuccessfulPosts / (totalSuccessfulPosts + totalFailedPosts)) * 100).toFixed(1);
@@ -1683,19 +1709,43 @@ class AutomationManager extends EventEmitter {
         accountName: accountName,
         successfulPosts: [],
         failedPosts: [],
-        totalAttempted: posts.length
+        totalAttempted: 0
       };
 
-      // Postuj do każdej grupy
-      for (let i = 0; i < posts.length; i++) {
+      // =============================================
+      // SYSTEM KOLEJKOWANIA: Pobieraj posty z współdzielonej kolejki
+      // =============================================
+      let postIndex = 0;
+
+      while (true) {
         // SPRAWDŹ CZY AUTOMATYZACJA NIE ZOSTAŁA ZATRZYMANA
         if (!this.isRunning) {
           this.addLog(`${logPrefix} ⏹️ Automatyzacja zatrzymana - przerywam postowanie`, 'warning');
           break;
         }
 
-        const post = posts[i];
-        this.addLog(`${logPrefix} [${i + 1}/${posts.length}] Postuję do: ${post.groupLink}`, 'info');
+        // Sprawdź czy to konto nie zostało zatrzymane
+        if (task.stoppedAccounts.has(task.accountId)) {
+          this.addLog(`${logPrefix} ⏹️ Konto zatrzymane - przerywam postowanie`, 'warning');
+          break;
+        }
+
+        // Sprawdź globalny flag stopu
+        if (task.getGlobalStopFlag()) {
+          this.addLog(`${logPrefix} 🛑 Globalny stop - przerywam postowanie`, 'error');
+          break;
+        }
+
+        // Pobierz następny post z kolejki
+        const post = task.getNextPost();
+        if (!post) {
+          this.addLog(`${logPrefix} ✅ Kolejka pusta - zakończono postowanie`, 'success');
+          break;
+        }
+
+        postIndex++;
+        accountStats.totalAttempted++;
+        this.addLog(`${logPrefix} [Post #${postIndex}] Postuję do: ${post.groupLink}`, 'info');
 
         try {
           await this.postToGroupInline(page, post.groupLink, post.postCopy, accountName);
@@ -1703,18 +1753,29 @@ class AutomationManager extends EventEmitter {
             groupLink: post.groupLink,
             groupName: post.groupName || post.groupLink
           });
+          this.addLog(`${logPrefix} ✅ Post opublikowany pomyślnie`, 'success');
         } catch (postError) {
-          this.addLog(`${logPrefix} ⚠️ Błąd postu: ${postError.message}`, 'error');
+          this.addLog(`${logPrefix} ❌ Błąd publikacji: ${postError.message}`, 'error');
+
+          // Zwróć post do kolejki
+          task.returnPostToQueue(post);
+          this.addLog(`${logPrefix} 🔄 Post wrócił do kolejki`, 'info');
+
+          // Zatrzymaj to konto
+          task.stopAccount(task.accountId, accountName, postError.message);
+
           accountStats.failedPosts.push({
             groupLink: post.groupLink,
             groupName: post.groupName || post.groupLink,
             error: postError.message
           });
-          // Kontynuuj z następnym postem zamiast przerywać
-          continue;
+
+          // Przerwij pętlę dla tego konta
+          break;
         }
 
-        if (i < posts.length - 1 && this.isRunning) {
+        // Opóźnienie między postami (jeśli są jeszcze posty)
+        if (this.isRunning && !task.getGlobalStopFlag()) {
           // Użyj automatycznego opóźnienia 4-18 min z gaussian distribution
           const delayMs = this.activityLimiter.getDelayBetweenGroups();
           const delayMin = Math.round(delayMs / 60000 * 10) / 10;
@@ -1735,11 +1796,16 @@ class AutomationManager extends EventEmitter {
       return accountStats; // Zwróć statystyki
 
     } catch (error) {
-      this.addLog(`${logPrefix} ❌ Błąd: ${error.message}`, 'error');
+      this.addLog(`${logPrefix} ❌ Błąd krytyczny: ${error.message}`, 'error');
 
       // 📸 SCREENSHOT NA BŁĘDZIE
       if (page) {
         await this.captureErrorScreenshot(page, 'task_error', task.accountId).catch(() => {});
+      }
+
+      // Zatrzymaj konto przy błędzie krytycznym (np. złe cookies, timeout logowania)
+      if (task.stopAccount) {
+        task.stopAccount(task.accountId, accountName, `Błąd krytyczny: ${error.message}`);
       }
 
       // Zwróć puste statystyki w razie błędu krytycznego
@@ -1748,7 +1814,7 @@ class AutomationManager extends EventEmitter {
         accountName: accountName,
         successfulPosts: [],
         failedPosts: [],
-        totalAttempted: posts.length,
+        totalAttempted: 0,
         criticalError: error.message
       };
     } finally {
