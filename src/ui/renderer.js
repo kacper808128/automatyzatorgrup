@@ -40,8 +40,10 @@ async function loadAllData() {
     await loadProxyList();
     await loadProxyConfig();
     await loadCredentials();
+    await loadPlaygroundConfig();
     renderAccountsList();
     await renderProxyList();
+    await renderPlaygroundProxyList();
     updatePreStartStatus();
 }
 
@@ -293,6 +295,7 @@ function setupEventListeners() {
     document.getElementById('stopPostingBtn')?.addEventListener('click', stopPosting);
 
     // === PLAYGROUND ===
+    document.getElementById('saveApiKeyBtn')?.addEventListener('click', savePlaygroundApiKey);
     document.getElementById('runPlaygroundBtn')?.addEventListener('click', runPlayground);
     document.getElementById('stopPlaygroundBtn')?.addEventListener('click', stopPlayground);
 
@@ -456,6 +459,7 @@ async function runPlayground() {
     const url = document.getElementById('playgroundUrl')?.value;
     const instructions = document.getElementById('playgroundInstructions')?.value;
     const cookiesText = document.getElementById('playgroundCookies')?.value;
+    const proxyId = document.getElementById('playgroundProxy')?.value;
 
     if (!url || !instructions) {
         showToast('Wypełnij URL i instrukcje', 'error');
@@ -465,7 +469,8 @@ async function runPlayground() {
     const config = {
         url,
         instructions,
-        cookies: cookiesText && cookiesText.trim() ? cookiesText : null
+        cookies: cookiesText && cookiesText.trim() ? cookiesText : null,
+        proxyId: proxyId && proxyId.trim() ? proxyId : null
     };
 
     document.getElementById('runPlaygroundBtn').disabled = true;
@@ -518,6 +523,61 @@ async function stopPlayground() {
         showToast('⏹️ Playground zatrzymany', 'warning');
         document.getElementById('runPlaygroundBtn').disabled = false;
         document.getElementById('stopPlaygroundBtn').disabled = true;
+    }
+}
+
+async function savePlaygroundApiKey() {
+    const apiKey = document.getElementById('anthropicApiKey')?.value;
+    const modelName = document.getElementById('geminiModel')?.value || 'gemini-1.5-flash-latest';
+
+    if (!apiKey || apiKey.trim() === '') {
+        showToast('❌ Wprowadź API Key', 'error');
+        return;
+    }
+
+    try {
+        const result = await ipcRenderer.invoke('playground-set-api-key', apiKey, modelName);
+        if (result.success) {
+            showToast('✅ Konfiguracja zapisana!', 'success');
+        }
+    } catch (e) {
+        showToast(`❌ Błąd zapisu: ${e.message}`, 'error');
+    }
+}
+
+async function loadPlaygroundConfig() {
+    try {
+        const config = await ipcRenderer.invoke('playground-get-config');
+        if (config.apiKey) {
+            document.getElementById('anthropicApiKey').value = config.apiKey;
+        }
+        if (config.modelName) {
+            document.getElementById('geminiModel').value = config.modelName;
+        }
+    } catch (e) {
+        console.error('Nie udało się załadować konfiguracji playground:', e);
+    }
+}
+
+async function renderPlaygroundProxyList() {
+    try {
+        const proxyList = await ipcRenderer.invoke('get-proxy-list');
+        const select = document.getElementById('playgroundProxy');
+
+        // Zachowaj opcję "Bez proxy"
+        select.innerHTML = '<option value="">🔓 Bez proxy</option>';
+
+        // Dodaj wszystkie proxy z listy
+        if (proxyList && proxyList.length > 0) {
+            proxyList.forEach(proxy => {
+                const option = document.createElement('option');
+                option.value = proxy.id;
+                option.textContent = `🌐 ${proxy.name || proxy.host}:${proxy.port}`;
+                select.appendChild(option);
+            });
+        }
+    } catch (e) {
+        console.error('Nie udało się załadować listy proxy dla playground:', e);
     }
 }
 

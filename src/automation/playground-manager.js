@@ -153,7 +153,7 @@ CZYSTY KOD (bez page.goto, strona już otwarta):`;
     }
   }
 
-  async runPlayground(config) {
+  async runPlayground(config, proxy = null) {
     if (this.isRunning) {
       throw new Error('Playground już działa');
     }
@@ -172,14 +172,28 @@ CZYSTY KOD (bez page.goto, strona już otwarta):`;
 
       const fingerprint = this.fingerprintManager.generateFingerprint();
 
-      this.browser = await chromium.launch({
+      const launchOptions = {
         headless: false,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled'
         ]
-      });
+      };
+
+      // Dodaj proxy jeśli zostało wybrane
+      if (proxy && proxy.host && proxy.port) {
+        launchOptions.proxy = {
+          server: `http://${proxy.host}:${proxy.port}`,
+          username: proxy.username || undefined,
+          password: proxy.password || undefined
+        };
+        this.addLog(`🌐 Używam proxy: ${proxy.name || proxy.host}:${proxy.port}`, 'info');
+      } else {
+        this.addLog('🔓 Bez proxy', 'info');
+      }
+
+      this.browser = await chromium.launch(launchOptions);
 
       // Playwright: context z fingerprint settings
       this.context = await this.browser.newContext({
