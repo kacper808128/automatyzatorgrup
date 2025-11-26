@@ -1903,36 +1903,79 @@ class AutomationManager extends EventEmitter {
 
         try {
           // Sprawdź czy już nie zareagowaliśmy
-          const isReacted = await btn.evaluate(el => {
+          const beforeClick = await btn.evaluate(el => {
             const parent = el.closest('[role="button"]') || el;
-            return parent.getAttribute('aria-pressed') === 'true';
+            return {
+              ariaPressed: parent.getAttribute('aria-pressed'),
+              ariaLabel: parent.getAttribute('aria-label')
+            };
           });
 
-          if (isReacted) continue;
+          if (beforeClick.ariaPressed === 'true') continue;
+
+          this.addLog(`${logPrefix} 🖱️ Klikam przycisk reakcji (${beforeClick.ariaLabel})`, 'info');
 
           // Przewiń do widoku i poczekaj
           await btn.scrollIntoViewIfNeeded();
           await randomDelay(300, 500);
 
-          // Użyj HumanMouse do naturalnego kliku (szybki, nie długi)
-          const humanMouse = new HumanMouse(page);
-          await humanMouse.clickElement(btn, { curve: 'bezier' });
-          await randomDelay(800, 1200);
+          // PRÓBA 1: Użyj HumanMouse do naturalnego kliku
+          try {
+            const humanMouse = new HumanMouse(page);
+            await humanMouse.clickElement(btn, { curve: 'bezier' });
+            await randomDelay(2000, 3000); // Zwiększony delay dla Facebook
+          } catch (mouseErr) {
+            // Jeśli HumanMouse zawiedzie, użyj zwykłego click
+            this.addLog(`${logPrefix} ⚠️ HumanMouse failed, używam click()`, 'warning');
+            await btn.click();
+            await randomDelay(2000, 3000);
+          }
 
-          // SPRAWDŹ CZY LIKE SIĘ UDAŁ (zmiana aria-label)
-          const likeSucceeded = await btn.evaluate(el => {
+          // SPRAWDŹ CZY LIKE SIĘ UDAŁ (zmiana stanu)
+          const afterClick = await btn.evaluate(el => {
             const parent = el.closest('[role="button"]') || el;
             const newLabel = (parent.getAttribute('aria-label') || '').toLowerCase();
-            // Jeśli zmienił się na "Unlike" / "Cofnij" = sukces
-            return newLabel.includes('unlike') ||
-                   newLabel.includes('cofnij') ||
-                   newLabel.includes('remove') ||
-                   parent.getAttribute('aria-pressed') === 'true';
+            const ariaPressed = parent.getAttribute('aria-pressed');
+            return {
+              ariaPressed: ariaPressed,
+              ariaLabel: parent.getAttribute('aria-label'),
+              success: newLabel.includes('unlike') ||
+                      newLabel.includes('cofnij') ||
+                      newLabel.includes('remove') ||
+                      ariaPressed === 'true'
+            };
           });
 
-          if (likeSucceeded) {
+          if (afterClick.success) {
             reactedCount++;
-            this.addLog(`${logPrefix} ❤️ Like ${reactedCount}/${count} (bezpośredni)`, 'success');
+            this.addLog(`${logPrefix} ❤️ Like ${reactedCount}/${count} (${afterClick.ariaLabel})`, 'success');
+            await randomDelay(1500, 2500);
+            continue;
+          }
+
+          // PRÓBA 2: Jeśli nie udało się, spróbuj jeszcze raz zwykłym click
+          this.addLog(`${logPrefix} 🔄 Pierwsze kliknięcie nie zadziałało, retry...`, 'info');
+          await btn.click();
+          await randomDelay(2000, 3000);
+
+          // Sprawdź ponownie
+          const afterRetry = await btn.evaluate(el => {
+            const parent = el.closest('[role="button"]') || el;
+            const newLabel = (parent.getAttribute('aria-label') || '').toLowerCase();
+            const ariaPressed = parent.getAttribute('aria-pressed');
+            return {
+              ariaPressed: ariaPressed,
+              ariaLabel: parent.getAttribute('aria-label'),
+              success: newLabel.includes('unlike') ||
+                      newLabel.includes('cofnij') ||
+                      newLabel.includes('remove') ||
+                      ariaPressed === 'true'
+            };
+          });
+
+          if (afterRetry.success) {
+            reactedCount++;
+            this.addLog(`${logPrefix} ❤️ Like ${reactedCount}/${count} (retry sukces)`, 'success');
             await randomDelay(1500, 2500);
             continue;
           }
@@ -2403,18 +2446,15 @@ class AutomationManager extends EventEmitter {
       
       this.addLog(`${logPrefix} ✅ Kliknięto publikuj`, 'success');
 
-      await randomDelay(3000, 5000);
+      // Czekaj dłużej - Facebook może ładować komunikat z opóźnieniem
+      this.addLog(`${logPrefix} ⏳ Czekam na potwierdzenie publikacji...`, 'info');
+      await randomDelay(8000, 12000);
 
       // =============================================
       // SPRAWDŹ CZY FACEBOOK NIE POKAZAŁ OGRANICZENIA
       // =============================================
       const restriction = await page.evaluate(() => {
-        // Szukaj komunikatu o ograniczeniu w modalu
-        const modal = document.querySelector('[role="dialog"]');
-        if (!modal) return null;
-
-        const text = modal.textContent || modal.innerText || '';
-        const lowerText = text.toLowerCase();
+        console.log('DEBUG: Sprawdzam ograniczenia FB...');
 
         // Polskie i angielskie wersje komunikatów o ograniczeniach
         const restrictionKeywords = [
@@ -2433,29 +2473,105 @@ class AutomationManager extends EventEmitter {
           'posting too',
           'zbyt wiele',
           'you\'re posting',
-          'publikujesz zbyt'
+          'publikujesz zbyt',
+          'slow down',
+          'zwolnij',
+          'spam',
+          'inappropriate',
+          'niewłaściwe',
+          'violat', // violation, naruszenie
+          'naruszen',
+          'against our',
+          'sprzeczn'
         ];
 
-        for (const keyword of restrictionKeywords) {
-          if (lowerText.includes(keyword)) {
-            // Znajdź dokładny tekst komunikatu (pierwsze 200 znaków)
-            const errorDiv = modal.querySelector('[role="heading"]') ||
-                            modal.querySelector('h2') ||
-                            modal.querySelector('div[style*="font-weight"]');
-            const message = errorDiv ? errorDiv.textContent.substring(0, 200) : text.substring(0, 200);
-            return {
-              detected: true,
-              message: message.trim()
-            };
+        // Znajdź WSZYSTKIE modale
+        const modals = Array.from(document.querySelectorAll('[role="dialog"]'));
+        console.log(`DEBUG: Znaleziono ${modals.length} modali`);
+
+        for (let i = 0; i < modals.length; i++) {
+          const modal = modals[i];
+          const rect = modal.getBoundingClientRect();
+          const isVisible = rect.width > 0 && rect.height > 0;
+
+          if (!isVisible) continue;
+
+          const text = modal.textContent || modal.innerText || '';
+          const lowerText = text.toLowerCase();
+
+          console.log(`DEBUG: Modal ${i + 1} (${rect.width}x${rect.height}): "${text.substring(0, 100)}..."`);
+
+          for (const keyword of restrictionKeywords) {
+            if (lowerText.includes(keyword)) {
+              console.log(`DEBUG: WYKRYTO SŁOWO KLUCZOWE: "${keyword}"`);
+
+              // Znajdź dokładny tekst komunikatu
+              const errorDiv = modal.querySelector('[role="heading"]') ||
+                              modal.querySelector('h2') ||
+                              modal.querySelector('h3') ||
+                              modal.querySelector('div[style*="font-weight"]') ||
+                              modal.querySelector('span[dir="auto"]');
+
+              const message = errorDiv ? errorDiv.textContent : text.substring(0, 300);
+
+              return {
+                detected: true,
+                message: message.trim(),
+                keyword: keyword,
+                fullText: text.substring(0, 500)
+              };
+            }
           }
         }
 
-        return null;
+        // Sprawdź też całą stronę (nie tylko modale)
+        const bodyText = (document.body.textContent || '').toLowerCase();
+        for (const keyword of restrictionKeywords) {
+          if (bodyText.includes(keyword)) {
+            console.log(`DEBUG: WYKRYTO SŁOWO NA STRONIE: "${keyword}"`);
+            // Znajdź element zawierający to słowo
+            const allDivs = Array.from(document.querySelectorAll('div, span'));
+            for (const div of allDivs) {
+              const divText = (div.textContent || '').toLowerCase();
+              if (divText.includes(keyword) && divText.length < 500) {
+                return {
+                  detected: true,
+                  message: div.textContent.substring(0, 300),
+                  keyword: keyword,
+                  source: 'body'
+                };
+              }
+            }
+          }
+        }
+
+        console.log('DEBUG: Nie wykryto ograniczenia');
+        return {
+          detected: false,
+          modalsCount: modals.length,
+          modalsText: modals.map(m => (m.textContent || '').substring(0, 100)).join(' | ')
+        };
       });
 
-      if (restriction && restriction.detected) {
+      // Loguj wynik detekcji
+      this.addLog(`${logPrefix} 🔍 Detekcja ograniczenia: ${restriction.detected ? 'TAK' : 'NIE'}`, 'info');
+
+      if (!restriction.detected && restriction.modalsCount > 0) {
+        this.addLog(`${logPrefix} 📋 Znaleziono ${restriction.modalsCount} modali bez słów kluczowych`, 'info');
+        this.addLog(`${logPrefix} 📝 Fragmenty: ${restriction.modalsText}`, 'info');
+      }
+
+      if (restriction.detected) {
         this.addLog(`${logPrefix} 🚫 FACEBOOK OGRANICZENIE WYKRYTE!`, 'error');
-        this.addLog(`${logPrefix} Komunikat: ${restriction.message}`, 'error');
+        this.addLog(`${logPrefix} 🔑 Słowo kluczowe: "${restriction.keyword}"`, 'error');
+        this.addLog(`${logPrefix} 📄 Komunikat: ${restriction.message}`, 'error');
+
+        if (restriction.fullText) {
+          this.addLog(`${logPrefix} 📋 Pełny tekst: ${restriction.fullText}`, 'error');
+        }
+
+        // 📸 SCREENSHOT OGRANICZENIA
+        await this.captureErrorScreenshot(page, 'facebook_restriction', accountName).catch(() => {});
 
         // Oznacz konto jako zbanowane
         this.activityLimiter.markAsBanned();
