@@ -40,6 +40,7 @@ async function loadAllData() {
     await loadProxyList();
     await loadProxyConfig();
     await loadCredentials();
+    await loadPlaygroundConfig();
     renderAccountsList();
     await renderProxyList();
     updatePreStartStatus();
@@ -293,6 +294,7 @@ function setupEventListeners() {
     document.getElementById('stopPostingBtn')?.addEventListener('click', stopPosting);
 
     // === PLAYGROUND ===
+    document.getElementById('saveApiKeyBtn')?.addEventListener('click', savePlaygroundApiKey);
     document.getElementById('runPlaygroundBtn')?.addEventListener('click', runPlayground);
     document.getElementById('stopPlaygroundBtn')?.addEventListener('click', stopPlayground);
 
@@ -518,6 +520,39 @@ async function stopPlayground() {
         showToast('⏹️ Playground zatrzymany', 'warning');
         document.getElementById('runPlaygroundBtn').disabled = false;
         document.getElementById('stopPlaygroundBtn').disabled = true;
+    }
+}
+
+async function savePlaygroundApiKey() {
+    const apiKey = document.getElementById('anthropicApiKey')?.value;
+    const modelName = document.getElementById('geminiModel')?.value || 'gemini-1.5-flash-latest';
+
+    if (!apiKey || apiKey.trim() === '') {
+        showToast('❌ Wprowadź API Key', 'error');
+        return;
+    }
+
+    try {
+        const result = await ipcRenderer.invoke('playground-set-api-key', apiKey, modelName);
+        if (result.success) {
+            showToast('✅ Konfiguracja zapisana!', 'success');
+        }
+    } catch (e) {
+        showToast(`❌ Błąd zapisu: ${e.message}`, 'error');
+    }
+}
+
+async function loadPlaygroundConfig() {
+    try {
+        const config = await ipcRenderer.invoke('playground-get-config');
+        if (config.apiKey) {
+            document.getElementById('anthropicApiKey').value = config.apiKey;
+        }
+        if (config.modelName) {
+            document.getElementById('geminiModel').value = config.modelName;
+        }
+    } catch (e) {
+        console.error('Nie udało się załadować konfiguracji playground:', e);
     }
 }
 
