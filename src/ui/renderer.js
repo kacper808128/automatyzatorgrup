@@ -43,6 +43,7 @@ async function loadAllData() {
     await loadPlaygroundConfig();
     renderAccountsList();
     await renderProxyList();
+    await renderPlaygroundProxyList();
     updatePreStartStatus();
 }
 
@@ -458,6 +459,7 @@ async function runPlayground() {
     const url = document.getElementById('playgroundUrl')?.value;
     const instructions = document.getElementById('playgroundInstructions')?.value;
     const cookiesText = document.getElementById('playgroundCookies')?.value;
+    const proxyId = document.getElementById('playgroundProxy')?.value;
 
     if (!url || !instructions) {
         showToast('Wypełnij URL i instrukcje', 'error');
@@ -467,7 +469,8 @@ async function runPlayground() {
     const config = {
         url,
         instructions,
-        cookies: cookiesText && cookiesText.trim() ? cookiesText : null
+        cookies: cookiesText && cookiesText.trim() ? cookiesText : null,
+        proxyId: proxyId && proxyId.trim() ? proxyId : null
     };
 
     document.getElementById('runPlaygroundBtn').disabled = true;
@@ -553,6 +556,28 @@ async function loadPlaygroundConfig() {
         }
     } catch (e) {
         console.error('Nie udało się załadować konfiguracji playground:', e);
+    }
+}
+
+async function renderPlaygroundProxyList() {
+    try {
+        const proxyList = await ipcRenderer.invoke('get-proxy-list');
+        const select = document.getElementById('playgroundProxy');
+
+        // Zachowaj opcję "Bez proxy"
+        select.innerHTML = '<option value="">🔓 Bez proxy</option>';
+
+        // Dodaj wszystkie proxy z listy
+        if (proxyList && proxyList.length > 0) {
+            proxyList.forEach(proxy => {
+                const option = document.createElement('option');
+                option.value = proxy.id;
+                option.textContent = `🌐 ${proxy.name || proxy.host}:${proxy.port}`;
+                select.appendChild(option);
+            });
+        }
+    } catch (e) {
+        console.error('Nie udało się załadować listy proxy dla playground:', e);
     }
 }
 

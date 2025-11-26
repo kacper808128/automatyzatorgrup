@@ -486,14 +486,24 @@ odczytaj wartość liczbową obok napisu Views</textarea>
 
                         <div class="form-group">
                             <label for="playgroundCookies">Cookies (opcjonalne, JSON array)</label>
-                            <textarea 
-                                id="playgroundCookies" 
+                            <textarea
+                                id="playgroundCookies"
                                 rows="6"
                                 class="form-control"
                                 placeholder='[{"name":"sessionid","value":"xxx","domain":".instagram.com"}]'
                             ></textarea>
                             <small class="text-muted">
                                 Format: [{`"name":"...", "value":"...", "domain":"..."`}]
+                            </small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="playgroundProxy">Proxy (opcjonalne)</label>
+                            <select id="playgroundProxy" class="form-control">
+                                <option value="">🔓 Bez proxy</option>
+                            </select>
+                            <small class="text-muted">
+                                Wybierz proxy z listy lub pozostaw bez proxy
                             </small>
                         </div>
 

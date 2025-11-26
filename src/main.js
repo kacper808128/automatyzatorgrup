@@ -410,7 +410,15 @@ function setupPlaygroundHandlers() {
 
   ipcMain.handle('playground-run', async (event, config) => {
     try {
-      const result = await playgroundManager.runPlayground(config);
+      // Pobierz proxy jeśli został wybrany
+      let proxy = null;
+      if (config.proxyId) {
+        const proxyList = automationManager.proxyList;
+        proxy = proxyList.find(p => p.id === config.proxyId);
+      }
+
+      // Przekaż proxy do playground
+      const result = await playgroundManager.runPlayground(config, proxy);
       return result;
     } catch (error) {
       return { success: false, error: error.message, logs: playgroundManager.getLogs() };
