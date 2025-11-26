@@ -475,7 +475,7 @@ async function runPlayground() {
     logsContainer.innerHTML = '<p style="color: #00ff88;">⏳ Uruchamiam...</p>';
 
     try {
-        const result = await ipcRenderer.invoke('run-playground', config);
+        const result = await ipcRenderer.invoke('playground-run', config);
 
         logsContainer.innerHTML = '';
 
@@ -513,7 +513,7 @@ async function runPlayground() {
 }
 
 async function stopPlayground() {
-    const result = await ipcRenderer.invoke('stop-playground');
+    const result = await ipcRenderer.invoke('playground-stop');
     if (result.success) {
         showToast('⏹️ Playground zatrzymany', 'warning');
         document.getElementById('runPlaygroundBtn').disabled = false;

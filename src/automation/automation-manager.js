@@ -1320,20 +1320,11 @@ class AutomationManager extends EventEmitter {
       postQueue.unshift(post); // Na początek kolejki
     };
 
-    // Funkcja zatrzymująca konto
-    const stopAccount = (accountId, accountName, reason) => {
-      if (stoppedAccounts.has(accountId)) return; // Już zatrzymane
+    // Funkcja zwracająca liczbę postów w kolejce
+    const getQueueLength = () => postQueue.length;
 
-      stoppedAccounts.add(accountId);
-      this.addLog(`❌ KONTO ZATRZYMANE: ${accountName} - ${reason}`, 'error');
-
-      if (stoppedAccounts.size > 2) {
-        globalStopFlag = true;
-        this.isRunning = false;
-        this.addLog(`\n🛑 STOP AUTOMATYZACJI - więcej niż 2 konta zatrzymane (${stoppedAccounts.size} kont)`, 'error');
-        this.addLog(`   Zatrzymane konta: ${Array.from(stoppedAccounts).join(', ')}`, 'error');
-      }
-    };
+    // Funkcja zatrzymująca konto (zostanie pełni zdefiniowana później po activateReserveAccount)
+    let stopAccount;
 
     const accountTasks = [];
     for (let i = 0; i < validAccounts.length; i++) {
@@ -1357,7 +1348,8 @@ class AutomationManager extends EventEmitter {
         returnPostToQueue,
         stopAccount,
         stoppedAccounts,
-        getGlobalStopFlag: () => globalStopFlag
+        getGlobalStopFlag: () => globalStopFlag,
+        getQueueLength
       });
 
       const proxyInfo = accountProxy ? `🌐 ${accountProxy.name || accountProxy.host}` : '🔓 bez proxy';
@@ -1367,6 +1359,16 @@ class AutomationManager extends EventEmitter {
     this.addLog(`\n✅ Utworzono kolejkę z ${posts.length} postami, uruchamiam ${accountTasks.length} instancji...`, 'success');
 
     // =============================================
+    // SYSTEM REZERWY: Podział na aktywne i rezerwowe konta
+    // =============================================
+    const activeTasks = accountTasks.slice(0, this.maxConcurrentAccounts);
+    const reserveTasks = accountTasks.slice(this.maxConcurrentAccounts);
+
+    if (reserveTasks.length > 0) {
+      this.addLog(`\n🔄 System rezerwy: ${activeTasks.length} kont aktywnych, ${reserveTasks.length} w rezerwie`, 'info');
+    }
+
+    // =============================================
     // MAX 5 KONT JEDNOCZEŚNIE - kontrola przepustowości
     // =============================================
     this.isRunning = true;
@@ -1374,10 +1376,75 @@ class AutomationManager extends EventEmitter {
 
     const results = [];
     const accountsStats = []; // Szczegółowe statystyki każdego konta
+    const executing = new Set(); // Współdzielony Set dla wszystkich kont (aktywnych + rezerwa)
+
+    // Funkcja aktywująca konto z rezerwy
+    const activateReserveAccount = () => {
+      if (reserveTasks.length === 0) return null;
+
+      const reserveTask = reserveTasks.shift();
+      this.addLog(`\n🔄 AKTYWUJĘ KONTO Z REZERWY: ${reserveTask.accountName}`, 'info');
+
+      // Uruchom konto w tle (fire-and-forget)
+      const taskPromise = (async () => {
+        try {
+          this.addLog(`▶️ Uruchamiam konto z rezerwy: ${reserveTask.accountName}`, 'info');
+          const stats = await this.runAccountTaskIsolated(reserveTask);
+          accountsStats.push(stats);
+
+          const hasError = stats.criticalError || stats.failedPosts.length > 0;
+          results.push({
+            accountId: reserveTask.accountId,
+            success: !hasError,
+            stats: stats
+          });
+        } catch (error) {
+          this.addLog(`❌ Błąd konta z rezerwy ${reserveTask.accountName}: ${error.message}`, 'error');
+          accountsStats.push({
+            accountId: reserveTask.accountId,
+            accountName: reserveTask.accountName,
+            successfulPosts: [],
+            failedPosts: [],
+            totalAttempted: 0,
+            criticalError: error.message
+          });
+        }
+      })().finally(() => {
+        executing.delete(taskPromise);
+      });
+
+      executing.add(taskPromise);
+      return reserveTask.accountName;
+    };
+
+    // Pełna definicja funkcji zatrzymującej konto (teraz mamy dostęp do activateReserveAccount)
+    stopAccount = (accountId, accountName, reason) => {
+      if (stoppedAccounts.has(accountId)) return; // Już zatrzymane
+
+      stoppedAccounts.add(accountId);
+      this.addLog(`❌ KONTO ZATRZYMANE: ${accountName} - ${reason}`, 'error');
+
+      // Aktywuj konto z rezerwy jeśli dostępne
+      const activatedAccount = activateReserveAccount();
+      if (activatedAccount) {
+        this.addLog(`✅ Aktywowano konto z rezerwy: ${activatedAccount}`, 'success');
+      }
+
+      // NOWA ZASADA STOPU: 70% kont zatrzymane + brak rezerwy
+      const totalAccounts = validAccounts.length;
+      const stoppedPercentage = (stoppedAccounts.size / totalAccounts) * 100;
+      const hasReserve = reserveTasks.length > 0;
+
+      if (stoppedPercentage >= 70 && !hasReserve) {
+        globalStopFlag = true;
+        this.isRunning = false;
+        this.addLog(`\n🛑 STOP AUTOMATYZACJI - ${stoppedPercentage.toFixed(0)}% kont zatrzymane i brak rezerwy`, 'error');
+        this.addLog(`   Zatrzymane konta: ${stoppedAccounts.size}/${totalAccounts}`, 'error');
+      }
+    };
 
     // Funkcja do uruchamiania zadań z limitem
     const runWithConcurrencyLimit = async (tasks, maxConcurrent) => {
-      const executing = new Set();
 
       for (const task of tasks) {
         // ⚠️ SPRAWDŹ CZY NIE ZATRZYMANO
@@ -1449,7 +1516,13 @@ class AutomationManager extends EventEmitter {
     };
 
     try {
-      await runWithConcurrencyLimit(accountTasks, this.maxConcurrentAccounts);
+      await runWithConcurrencyLimit(activeTasks, this.maxConcurrentAccounts);
+
+      // Poczekaj na wszystkie konta (włącznie z tymi z rezerwy)
+      if (executing.size > 0) {
+        this.addLog(`⏳ Czekam na zakończenie ${executing.size} kont (włącznie z rezerwą)...`, 'info');
+        await Promise.all(executing);
+      }
 
       const successCount = results.filter(r => r.success).length;
       const failedAccounts = results.filter(r => !r.success).length;
@@ -1485,7 +1558,12 @@ class AutomationManager extends EventEmitter {
 
       // Statystyki kont
       this.addLog(`\n👥 KONTA:`, 'info');
-      this.addLog(`   • Kont użytych: ${accountTasks.length}`, 'info');
+      this.addLog(`   • Kont ogółem: ${accountTasks.length}`, 'info');
+      this.addLog(`   • Kont aktywnych na start: ${activeTasks.length}`, 'info');
+      if (accountTasks.length > activeTasks.length) {
+        const reserveUsed = activeTasks.length + (accountTasks.length - activeTasks.length - reserveTasks.length);
+        this.addLog(`   • Kont z rezerwy użytych: ${reserveUsed}/${accountTasks.length - activeTasks.length}`, 'info');
+      }
       this.addLog(`   • Kont z sukcesem: ${successCount}`, 'success');
       this.addLog(`   • Kont z błędami: ${failedAccounts}`, failedAccounts > 0 ? 'warning' : 'info');
       this.addLog(`   • Kont zatrzymanych: ${stoppedAccounts.size}`, stoppedAccounts.size > 0 ? 'error' : 'info');
@@ -1503,10 +1581,9 @@ class AutomationManager extends EventEmitter {
 
       // Posty per grupa
       if (groupStats.size > 0) {
-        this.addLog(`\n🎯 POSTY PER GRUPA (top 10):`, 'info');
+        this.addLog(`\n🎯 POSTY PER GRUPA:`, 'info');
         const sortedGroups = Array.from(groupStats.entries())
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 10);
+          .sort((a, b) => b[1] - a[1]);
 
         for (const [groupLink, count] of sortedGroups) {
           const groupName = groupLink.split('/').pop() || groupLink;
@@ -1753,7 +1830,8 @@ class AutomationManager extends EventEmitter {
             groupLink: post.groupLink,
             groupName: post.groupName || post.groupLink
           });
-          this.addLog(`${logPrefix} ✅ Post opublikowany pomyślnie`, 'success');
+          const remainingPosts = task.getQueueLength();
+          this.addLog(`${logPrefix} ✅ Post opublikowany pomyślnie | Pozostało w kolejce: ${remainingPosts}`, 'success');
         } catch (postError) {
           this.addLog(`${logPrefix} ❌ Błąd publikacji: ${postError.message}`, 'error');
 
