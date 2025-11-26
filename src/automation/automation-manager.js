@@ -1953,12 +1953,12 @@ class AutomationManager extends EventEmitter {
           try {
             const humanMouse = new HumanMouse(page);
             await humanMouse.clickElement(btn, { curve: 'bezier' });
-            await randomDelay(2000, 3000); // Zwiększony delay dla Facebook
+            await randomDelay(4000, 5000); // Zwiększony delay - Facebook potrzebuje czasu
           } catch (mouseErr) {
             // Jeśli HumanMouse zawiedzie, użyj zwykłego click
             this.addLog(`${logPrefix} ⚠️ HumanMouse failed, używam click()`, 'warning');
             await btn.click();
-            await randomDelay(2000, 3000);
+            await randomDelay(4000, 5000);
           }
 
           // SPRAWDŹ CZY LIKE SIĘ UDAŁ (zmiana stanu)
@@ -1972,8 +1972,13 @@ class AutomationManager extends EventEmitter {
               success: newLabel.includes('unlike') ||
                       newLabel.includes('cofnij') ||
                       newLabel.includes('remove') ||
+                      newLabel.includes('usuń') ||
+                      newLabel.includes('zmień') ||
                       ariaPressed === 'true'
             };
+          }).catch(err => {
+            // Element zniknął/zmienił się - prawdopodobnie like zadziałał
+            return { success: true, ariaLabel: 'detached (prawdopodobnie sukces)', ariaPressed: null };
           });
 
           if (afterClick.success) {
@@ -1983,10 +1988,46 @@ class AutomationManager extends EventEmitter {
             continue;
           }
 
-          // PRÓBA 2: Jeśli nie udało się, spróbuj jeszcze raz zwykłym click
-          this.addLog(`${logPrefix} 🔄 Pierwsze kliknięcie nie zadziałało, retry...`, 'info');
-          await btn.click();
-          await randomDelay(2000, 3000);
+          // PRÓBA 2: Jeśli nie udało się, sprawdź element ponownie (może zmienił się z opóźnieniem)
+          this.addLog(`${logPrefix} 🔄 Sprawdzam ponownie po dodatkowym oczekiwaniu...`, 'info');
+          await randomDelay(3000, 4000); // Dodatkowe czekanie
+
+          const recheckAfterDelay = await btn.evaluate(el => {
+            const parent = el.closest('[role="button"]') || el;
+            const newLabel = (parent.getAttribute('aria-label') || '').toLowerCase();
+            const ariaPressed = parent.getAttribute('aria-pressed');
+            return {
+              ariaPressed: ariaPressed,
+              ariaLabel: parent.getAttribute('aria-label'),
+              success: newLabel.includes('unlike') ||
+                      newLabel.includes('cofnij') ||
+                      newLabel.includes('remove') ||
+                      newLabel.includes('usuń') ||
+                      newLabel.includes('zmień') ||
+                      ariaPressed === 'true'
+            };
+          }).catch(err => {
+            // Element zniknął - prawdopodobnie like zadziałał
+            return { success: true, ariaLabel: 'detached po delay', ariaPressed: null };
+          });
+
+          if (recheckAfterDelay.success) {
+            reactedCount++;
+            this.addLog(`${logPrefix} ❤️ Like ${reactedCount}/${count} (opóźniona zmiana: ${recheckAfterDelay.ariaLabel})`, 'success');
+            await randomDelay(1500, 2500);
+            continue;
+          }
+
+          // PRÓBA 3: Jeśli NADAL nie zadziałało, spróbuj retry (ALE OSTROŻNIE - może odkliknąć)
+          this.addLog(`${logPrefix} 🔄 Ostatnia próba - click retry...`, 'info');
+
+          try {
+            await btn.click();
+            await randomDelay(3000, 4000);
+          } catch (clickErr) {
+            this.addLog(`${logPrefix} ⚠️ Click retry failed: ${clickErr.message}`, 'warning');
+            continue;
+          }
 
           // Sprawdź ponownie
           const afterRetry = await btn.evaluate(el => {
@@ -1999,8 +2040,12 @@ class AutomationManager extends EventEmitter {
               success: newLabel.includes('unlike') ||
                       newLabel.includes('cofnij') ||
                       newLabel.includes('remove') ||
+                      newLabel.includes('usuń') ||
+                      newLabel.includes('zmień') ||
                       ariaPressed === 'true'
             };
+          }).catch(err => {
+            return { success: false, ariaLabel: 'detached', ariaPressed: null };
           });
 
           if (afterRetry.success) {
@@ -2477,8 +2522,8 @@ class AutomationManager extends EventEmitter {
       this.addLog(`${logPrefix} ✅ Kliknięto publikuj`, 'success');
 
       // Czekaj dłużej - Facebook może ładować komunikat z opóźnieniem
-      this.addLog(`${logPrefix} ⏳ Czekam na potwierdzenie publikacji...`, 'info');
-      await randomDelay(8000, 12000);
+      this.addLog(`${logPrefix} ⏳ Czekam na potwierdzenie publikacji lub błąd...`, 'info');
+      await randomDelay(15000, 20000); // Zwiększone z 8-12s do 15-20s
 
       // =============================================
       // SPRAWDŹ CZY FACEBOOK NIE POKAZAŁ OGRANICZENIA
@@ -2546,36 +2591,50 @@ class AutomationManager extends EventEmitter {
                                    headingText.includes('publikuj');
 
           if (isCreatePostModal) {
-            console.log(`DEBUG: Modal ${i + 1} to modal tworzenia posta, sprawdzam tylko alerty wewnątrz`);
+            console.log(`DEBUG: Modal ${i + 1} to modal tworzenia posta, sprawdzam wszystkie divy (z wyjątkiem textarea/input)`);
 
-            // W modalu tworzenia posta sprawdzaj TYLKO w alertach/error divs, NIE w całym tekście
-            const modalAlerts = modal.querySelectorAll(
-              '[role="alert"], [role="alertdialog"], [role="status"], ' +
-              'div[style*="color: rgb(244"], div[style*="color:rgb(244"], ' + // Czerwony kolor FB
-              'div[style*="color: rgb(176"], div[style*="color:rgb(176"]'  // Pomarańczowy warning FB
-            );
+            // Zbierz treść z textarea/input (treść posta użytkownika) aby ją pominąć
+            const userInputs = modal.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]');
+            const userTexts = Array.from(userInputs).map(el => (el.value || el.textContent || '').toLowerCase());
 
-            console.log(`DEBUG: Znaleziono ${modalAlerts.length} alertów w modalu tworzenia posta`);
+            // Sprawdzaj WSZYSTKIE divy w modalu (nie tylko z role="alert")
+            const allDivs = modal.querySelectorAll('div, span, p');
+            console.log(`DEBUG: Znaleziono ${allDivs.length} elementów w modalu tworzenia posta`);
 
-            for (const alert of modalAlerts) {
-              const alertText = (alert.textContent || '').toLowerCase();
-              if (alertText.length > 15) { // Min 15 znaków (nie puste)
-                for (const keyword of restrictionKeywords) {
-                  if (alertText.includes(keyword)) {
-                    console.log(`DEBUG: WYKRYTO OGRANICZENIE W MODALU TWORZENIA POSTA: "${keyword}"`);
-                    return {
-                      detected: true,
-                      message: alert.textContent.substring(0, 400),
-                      keyword: keyword,
-                      source: 'createPostModalAlert',
-                      fullText: alert.textContent
-                    };
-                  }
+            for (const div of allDivs) {
+              // Pomiń puste elementy
+              const divText = (div.textContent || '').trim();
+              if (divText.length < 50) continue; // Komunikat o ograniczeniu ma więcej niż 50 znaków
+
+              const divLower = divText.toLowerCase();
+
+              // Pomiń jeśli to treść posta użytkownika
+              let isUserContent = false;
+              for (const userText of userTexts) {
+                if (userText.length > 10 && divLower.includes(userText)) {
+                  isUserContent = true;
+                  break;
+                }
+              }
+              if (isUserContent) continue;
+
+              // Sprawdź słowa kluczowe
+              for (const keyword of restrictionKeywords) {
+                if (divLower.includes(keyword)) {
+                  console.log(`DEBUG: WYKRYTO OGRANICZENIE W MODALU TWORZENIA POSTA: "${keyword}"`);
+                  console.log(`DEBUG: Tekst: "${divText.substring(0, 200)}..."`);
+                  return {
+                    detected: true,
+                    message: divText.substring(0, 400),
+                    keyword: keyword,
+                    source: 'createPostModalDiv',
+                    fullText: divText
+                  };
                 }
               }
             }
 
-            continue; // Nie sprawdzaj całego tekstu modala (tam jest treść posta)
+            continue; // Jeśli nie znaleziono, kontynuuj do następnego modala
           }
 
           console.log(`DEBUG: Modal ${i + 1} (${rect.width}x${rect.height}): "${text.substring(0, 100)}..."`);
