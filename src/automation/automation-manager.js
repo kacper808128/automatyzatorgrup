@@ -229,7 +229,7 @@ class AutomationManager extends EventEmitter {
       await context.addCookies(normalizedCookies);
       const page = await context.newPage();
 
-      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
       const currentUrl = page.url();
 
       // Sprawdź czy nie przekierowało na login
@@ -491,7 +491,7 @@ class AutomationManager extends EventEmitter {
       const page = await context.newPage();
 
       // Odwiedź Facebook żeby odświeżyć sesję
-      await page.goto('https://www.facebook.com/', { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
       const currentUrl = page.url();
 
       if (currentUrl.includes('login') || currentUrl.includes('checkpoint')) {
@@ -960,8 +960,8 @@ class AutomationManager extends EventEmitter {
       this.addLog('Rozpoczynam test logowania...', 'info');
 
       await this.initBrowser();
-      // Playwright: waitUntil 'networkidle' zamiast 'networkidle'
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
+      // Playwright: domcontentloaded for faster loading
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
       await randomDelay(2000, 4000);
 
       // Wpisywanie emaila - Playwright style
@@ -1054,7 +1054,7 @@ class AutomationManager extends EventEmitter {
           this.addLog('✅ Cookies załadowane', 'success');
 
           // Przejdź na Facebook żeby cookies zadziałały
-          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
+          await this.page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
           await randomDelay(3000, 5000);
 
           const currentUrl = this.page.url();
@@ -1178,8 +1178,8 @@ class AutomationManager extends EventEmitter {
           
           await this.context.addCookies(normalizedCookies);
           this.addLog('✅ Cookies załadowane', 'success');
-          
-          await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
+
+          await this.page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
           await randomDelay(3000, 5000);
           
           const currentUrl = this.page.url();
@@ -1346,7 +1346,7 @@ class AutomationManager extends EventEmitter {
         // Przekaż funkcje do zarządzania kolejką
         getNextPost,
         returnPostToQueue,
-        stopAccount,
+        stopAccount: (id, name, reason) => stopAccount(id, name, reason), // Function wrapper to resolve at call time
         stoppedAccounts,
         getGlobalStopFlag: () => globalStopFlag,
         getQueueLength
@@ -2896,7 +2896,7 @@ class AutomationManager extends EventEmitter {
     
     if (hasCookies) {
       this.addLog('Sprawdzam zapisaną sesję...', 'info');
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
       await randomDelay(3000, 5000);
       
       // Sprawdź URL - jeśli nie przekierowuje na login, prawdopodobnie jesteśmy zalogowani
@@ -2925,7 +2925,7 @@ class AutomationManager extends EventEmitter {
     
     // Jeśli już jesteśmy na Facebooku, sprawdź czy są pola logowania
     if (!currentUrl.includes('facebook.com')) {
-      await this.page.goto('https://www.facebook.com/', { waitUntil: 'networkidle' });
+      await this.page.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
       await randomDelay(2000, 4000);
     }
     
@@ -3190,7 +3190,7 @@ class AutomationManager extends EventEmitter {
     try {
       this.addLog(`Postuję do grupy: ${groupUrl}`, 'info');
 
-      await this.page.goto(groupUrl, { waitUntil: 'networkidle' });
+      await this.page.goto(groupUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await randomDelay(3000, 5000);
 
       await this.checkForVerification();

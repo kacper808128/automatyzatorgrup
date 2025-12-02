@@ -313,8 +313,48 @@ function setupEventListeners() {
 
     document.getElementById('clearPostingLogsBtn')?.addEventListener('click', () => {
         const container = document.getElementById('postingLogsContainer');
+        const searchInput = document.getElementById('postingLogsSearch');
         if (container) {
             container.innerHTML = '<p style="color: #666;">Logi pojawią się tutaj po rozpoczęciu postowania...</p>';
+        }
+        if (searchInput) {
+            searchInput.value = '';
+        }
+    });
+
+    // Search posting logs
+    document.getElementById('postingLogsSearch')?.addEventListener('input', (e) => {
+        const searchTerm = e.target.value.toLowerCase();
+        const container = document.getElementById('postingLogsContainer');
+        if (!container) return;
+
+        const logEntries = container.querySelectorAll('div[data-log-entry]');
+        let visibleCount = 0;
+
+        logEntries.forEach(entry => {
+            const text = entry.textContent.toLowerCase();
+            if (text.includes(searchTerm)) {
+                entry.style.display = '';
+                visibleCount++;
+            } else {
+                entry.style.display = 'none';
+            }
+        });
+
+        // Show message if no results
+        const noResultsMsg = container.querySelector('.no-results-message');
+        if (visibleCount === 0 && logEntries.length > 0 && searchTerm) {
+            if (!noResultsMsg) {
+                const msg = document.createElement('p');
+                msg.className = 'no-results-message';
+                msg.style.color = '#999';
+                msg.style.textAlign = 'center';
+                msg.style.padding = '20px';
+                msg.textContent = `Nie znaleziono wyników dla: "${e.target.value}"`;
+                container.appendChild(msg);
+            }
+        } else if (noResultsMsg) {
+            noResultsMsg.remove();
         }
     });
 
@@ -927,6 +967,7 @@ function addPostingLogEntry(log) {
     }
 
     const entry = document.createElement('div');
+    entry.setAttribute('data-log-entry', 'true');
     entry.style.marginBottom = '5px';
     entry.style.padding = '3px 0';
     entry.style.borderBottom = '1px solid #222';
