@@ -239,8 +239,8 @@ CZYSTY KOD (bez page.goto, strona już otwarta):`;
       }
 
       this.addLog(`Otwieram: ${config.url}`, 'info');
-      // Playwright: networkidle zamiast networkidle2
-      await this.page.goto(config.url, { waitUntil: 'networkidle' });
+      // Playwright: domcontentloaded for faster loading
+      await this.page.goto(config.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await delay(2000);
 
       this.addLog('Wykonuję...', 'info');

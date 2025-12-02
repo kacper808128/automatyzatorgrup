@@ -87,8 +87,8 @@ class InstagramChecker {
         }
       }
 
-      // Przejdź na reel - Playwright: networkidle zamiast networkidle2
-      await this.page.goto(url, { waitUntil: 'networkidle' });
+      // Przejdź na reel - Playwright: domcontentloaded for faster loading
+      await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
       await delay(3000);
 
       // Kliknij "View insights"
