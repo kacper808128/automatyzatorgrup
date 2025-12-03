@@ -192,9 +192,10 @@ class AutomationManager extends EventEmitter {
   /**
    * Weryfikuje cookies online (sprawdza czy sesja jest aktywna)
    * @param {string|Array} cookies - cookies do sprawdzenia
+   * @param {string} accountId - ID konta (opcjonalne, do automatycznego zapisu cookies)
    * @returns {Promise<Object>} { valid: boolean, reason: string }
    */
-  async validateCookiesOnline(cookies) {
+  async validateCookiesOnline(cookies, accountId = null) {
     const { chromium } = require('playwright');
 
     // Najpierw walidacja offline
@@ -237,12 +238,41 @@ class AutomationManager extends EventEmitter {
                         !currentUrl.includes('checkpoint') &&
                         currentUrl.includes('facebook.com');
 
-      await context.close();
-      await browser.close();
-
       if (isLoggedIn) {
+        // AUTOMATYCZNE ODŚWIEŻANIE COOKIES - Zapisz świeże cookies po pozytywnej walidacji
+        if (accountId) {
+          try {
+            const freshCookies = await context.cookies();
+            const cookiesJson = JSON.stringify(freshCookies);
+
+            // Pobierz wszystkie konta
+            const allAccounts = this.store.get('facebookAccounts', []);
+
+            // Znajdź i zaktualizuj to konkretne konto
+            const accountIndex = allAccounts.findIndex(acc => acc.id === accountId);
+            if (accountIndex !== -1) {
+              allAccounts[accountIndex].cookies = cookiesJson;
+              allAccounts[accountIndex].cookieValidation = {
+                isValid: true,
+                lastChecked: new Date().toISOString(),
+                checkedBy: 'auto_refresh_on_validation'
+              };
+
+              // Zapisz zaktualizowaną listę kont
+              this.store.set('facebookAccounts', allAccounts);
+            }
+          } catch (cookieError) {
+            // Ignoruj błąd zapisu - walidacja jest OK
+          }
+        }
+
+        await context.close();
+        await browser.close();
+
         return { valid: true, reason: 'Sesja aktywna', ...offlineCheck };
       } else {
+        await context.close();
+        await browser.close();
         return { valid: false, reason: 'Sesja wygasła - cookies nieważne online' };
       }
 
@@ -275,7 +305,7 @@ class AutomationManager extends EventEmitter {
       let validation;
       if (checkOnline) {
         this.addLog(`🔍 Sprawdzam online: ${account.name || account.email || `Konto #${account.id}`}...`, 'info');
-        validation = await this.validateCookiesOnline(account.cookies);
+        validation = await this.validateCookiesOnline(account.cookies, account.id);
       } else {
         validation = this.validateCookies(account.cookies);
       }
@@ -339,7 +369,35 @@ class AutomationManager extends EventEmitter {
     };
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-    this.addLog(`💾 StorageState zapisany dla konta ${accountId}`, 'success');
+    // AUTOMATYCZNE ODŚWIEŻANIE COOKIES W STORE - Zapisz świeże cookies
+    try {
+      const freshCookies = await context.cookies();
+      const cookiesJson = JSON.stringify(freshCookies);
+
+      // Pobierz wszystkie konta
+      const allAccounts = this.store.get('facebookAccounts', []);
+
+      // Znajdź i zaktualizuj to konkretne konto
+      const accountIndex = allAccounts.findIndex(acc => acc.id === accountId);
+      if (accountIndex !== -1) {
+        allAccounts[accountIndex].cookies = cookiesJson;
+        allAccounts[accountIndex].cookieValidation = {
+          isValid: true,
+          lastChecked: new Date().toISOString(),
+          checkedBy: 'auto_refresh_after_posting'
+        };
+
+        // Zapisz zaktualizowaną listę kont
+        this.store.set('facebookAccounts', allAccounts);
+
+        this.addLog(`💾 StorageState + cookies zapisane dla konta ${accountId}`, 'success');
+      } else {
+        this.addLog(`💾 StorageState zapisany dla konta ${accountId}`, 'success');
+      }
+    } catch (cookieError) {
+      this.addLog(`💾 StorageState zapisany dla konta ${accountId} (cookies nie zaktualizowane)`, 'warning');
+    }
+
     return statePath;
   }
 
@@ -1859,6 +1917,35 @@ class AutomationManager extends EventEmitter {
         }
       } else {
         this.addLog(`${logPrefix} ✅ Zalogowano pomyślnie!`, 'success');
+
+        // AUTOMATYCZNE ODŚWIEŻANIE COOKIES - Zapisz świeże cookies po każdym logowaniu
+        this.addLog(`${logPrefix} 🔄 Odświeżam cookies...`, 'info');
+        try {
+          const freshCookies = await context.cookies();
+          const cookiesJson = JSON.stringify(freshCookies);
+
+          // Pobierz wszystkie konta
+          const allAccounts = this.store.get('facebookAccounts', []);
+
+          // Znajdź i zaktualizuj to konkretne konto
+          const accountIndex = allAccounts.findIndex(acc => acc.id === task.accountId);
+          if (accountIndex !== -1) {
+            allAccounts[accountIndex].cookies = cookiesJson;
+            allAccounts[accountIndex].cookieValidation = {
+              isValid: true,
+              lastChecked: new Date().toISOString(),
+              checkedBy: 'auto_refresh_on_login'
+            };
+
+            // Zapisz zaktualizowaną listę kont
+            this.store.set('facebookAccounts', allAccounts);
+
+            this.addLog(`${logPrefix} 💾 Cookies odświeżone i zapisane!`, 'success');
+          }
+        } catch (cookieError) {
+          this.addLog(`${logPrefix} ⚠️ Nie udało się odświeżyć cookies: ${cookieError.message}`, 'warning');
+          // Kontynuuj mimo błędu - zalogowanie jest OK
+        }
       }
 
       // Statystyki dla tego konta
