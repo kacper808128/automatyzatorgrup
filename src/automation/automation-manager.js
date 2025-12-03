@@ -1775,10 +1775,91 @@ class AutomationManager extends EventEmitter {
         // Screenshot błędu
         await this.captureErrorScreenshot(page, 'login_failed', task.accountId);
 
-        throw new Error(`Cookies nieważne dla konta ${accountName} - wymagane ponowne logowanie`);
-      }
+        // NOWA FUNKCJONALNOŚĆ: Pozwól użytkownikowi ręcznie się zalogować
+        this.addLog(`${logPrefix} 🔄 PRZEGLĄDARKA POZOSTANIE OTWARTA - Zaloguj się ręcznie!`, 'warning');
+        this.addLog(`${logPrefix} ⏳ Czekam maksymalnie 5 minut na logowanie...`, 'info');
+        this.addLog(`${logPrefix} 📌 Po zalogowaniu przeglądarka automatycznie kontynuuje i zapisze nowe cookies`, 'info');
 
-      this.addLog(`${logPrefix} ✅ Zalogowano pomyślnie!`, 'success');
+        // Czekaj na zalogowanie użytkownika (max 5 minut)
+        const loginTimeout = 5 * 60 * 1000; // 5 minut
+        const startTime = Date.now();
+        let userLoggedIn = false;
+
+        while (Date.now() - startTime < loginTimeout) {
+          await randomDelay(5000, 7000); // Sprawdzaj co 5-7 sekund
+
+          try {
+            const checkUrl = page.url();
+            const stillOnLogin = checkUrl.includes('login') ||
+                                checkUrl.includes('checkpoint') ||
+                                checkUrl.includes('/recover');
+
+            // Sprawdź czy użytkownik jest zalogowany
+            const nowLoggedIn = await page.evaluate(() => {
+              const hasNavigation = document.querySelector('[role="navigation"]') !== null;
+              const hasLoginForm = document.querySelector('#email') !== null &&
+                                  document.querySelector('#pass') !== null;
+              const hasProfileLinks = document.querySelector('[aria-label*="profil"]') !== null ||
+                                     document.querySelector('[aria-label*="Profile"]') !== null ||
+                                     document.querySelector('[aria-label*="konto"]') !== null ||
+                                     document.querySelector('[aria-label*="Account"]') !== null;
+              return hasNavigation && !hasLoginForm;
+            }).catch(() => false);
+
+            if (!stillOnLogin && nowLoggedIn) {
+              userLoggedIn = true;
+              break;
+            }
+
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            if (elapsed % 30 === 0) { // Co 30 sekund przypominaj
+              this.addLog(`${logPrefix} ⏳ Nadal czekam na logowanie... (${elapsed}s)`, 'info');
+            }
+          } catch (checkError) {
+            // Ignoruj błędy sprawdzania
+          }
+        }
+
+        if (!userLoggedIn) {
+          this.addLog(`${logPrefix} ⏱️ Timeout - nie zalogowano w ciągu 5 minut`, 'error');
+          throw new Error(`Timeout logowania dla konta ${accountName}`);
+        }
+
+        this.addLog(`${logPrefix} ✅ Wykryto logowanie! Zapisuję nowe cookies...`, 'success');
+
+        // Pobierz nowe cookies z przeglądarki
+        try {
+          const newCookies = await context.cookies();
+          const cookiesJson = JSON.stringify(newCookies);
+
+          // Pobierz wszystkie konta
+          const allAccounts = this.store.get('facebookAccounts', []);
+
+          // Znajdź i zaktualizuj to konkretne konto
+          const accountIndex = allAccounts.findIndex(acc => acc.id === task.accountId);
+          if (accountIndex !== -1) {
+            allAccounts[accountIndex].cookies = cookiesJson;
+            allAccounts[accountIndex].cookieValidation = {
+              isValid: true,
+              lastChecked: new Date().toISOString(),
+              checkedBy: 'manual_login_recovery'
+            };
+
+            // Zapisz zaktualizowaną listę kont
+            this.store.set('facebookAccounts', allAccounts);
+
+            this.addLog(`${logPrefix} 💾 Nowe cookies zapisane dla konta ${accountName}!`, 'success');
+            this.addLog(`${logPrefix} ✅ Kontynuuję postowanie z nową sesją...`, 'success');
+          } else {
+            this.addLog(`${logPrefix} ⚠️ Nie znaleziono konta w store - kontynuuję bez zapisu`, 'warning');
+          }
+        } catch (cookieError) {
+          this.addLog(`${logPrefix} ⚠️ Błąd zapisu cookies: ${cookieError.message}`, 'warning');
+          this.addLog(`${logPrefix} Kontynuuję postowanie mimo błędu zapisu...`, 'info');
+        }
+      } else {
+        this.addLog(`${logPrefix} ✅ Zalogowano pomyślnie!`, 'success');
+      }
 
       // Statystyki dla tego konta
       const accountStats = {
