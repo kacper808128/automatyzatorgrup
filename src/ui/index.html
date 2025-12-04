@@ -567,8 +567,20 @@ odczytaj wartość liczbową obok napisu Views</textarea>
                     </div>
                     
                     <div class="card">
+                        <h3>Ustawienia postowania</h3>
+
+                        <div class="form-group">
+                            <label for="maxPostsPerAccount">Limit postów na konto:</label>
+                            <input type="number" id="maxPostsPerAccount" min="0" value="10" style="width: 100px;">
+                            <small class="text-muted" style="display: block; margin-top: 5px;">
+                                Każde konto wykona maksymalnie X postów, potem wchodzi kolejne z rezerwy. Ustaw 0 aby wyłączyć konto.
+                            </small>
+                        </div>
+                    </div>
+
+                    <div class="card">
                         <h3>Symulacja ludzkiego zachowania</h3>
-                        
+
                         <div class="form-group">
                             <label for="typingSpeed">Prędkość pisania:</label>
                             <select id="typingSpeed">
