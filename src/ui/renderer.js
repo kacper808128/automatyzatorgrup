@@ -41,6 +41,7 @@ async function loadAllData() {
     await loadProxyConfig();
     await loadCredentials();
     await loadPlaygroundConfig();
+    await loadSettings();
     renderAccountsList();
     await renderProxyList();
     await renderPlaygroundProxyList();
@@ -93,6 +94,34 @@ async function loadCredentials() {
         }
     } catch (e) {
         console.error('Error loading credentials:', e);
+    }
+}
+
+async function loadSettings() {
+    try {
+        const maxPostsPerAccount = await ipcRenderer.invoke('get-setting', 'maxPostsPerAccount');
+        document.getElementById('maxPostsPerAccount').value = maxPostsPerAccount !== undefined ? maxPostsPerAccount : 10;
+    } catch (e) {
+        console.error('Error loading settings:', e);
+        document.getElementById('maxPostsPerAccount').value = 10;
+    }
+}
+
+async function saveSettings() {
+    try {
+        const maxPostsPerAccount = parseInt(document.getElementById('maxPostsPerAccount').value) || 0;
+
+        // Walidacja
+        if (maxPostsPerAccount < 0) {
+            showToast('Limit postów musi być >= 0', 'error');
+            return;
+        }
+
+        await ipcRenderer.invoke('save-setting', 'maxPostsPerAccount', maxPostsPerAccount);
+        showToast('✅ Ustawienia zapisane', 'success');
+    } catch (e) {
+        console.error('Error saving settings:', e);
+        showToast('Błąd zapisu ustawień', 'error');
     }
 }
 
@@ -380,6 +409,9 @@ function setupEventListeners() {
     document.getElementById('cancelSchedule')?.addEventListener('click', () => {
         document.getElementById('scheduleModal').style.display = 'none';
     });
+
+    // === USTAWIENIA ===
+    document.getElementById('saveSettingsBtn')?.addEventListener('click', saveSettings);
 
     // === AKTUALIZACJA STATUSU ===
     document.getElementById('groupsList')?.addEventListener('input', updatePreStartStatus);

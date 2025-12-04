@@ -74,6 +74,9 @@ class AutomationManager extends EventEmitter {
     // Concurrent accounts limit
     this.maxConcurrentAccounts = 5;
     this.activeAccountTasks = new Map(); // accountId -> Promise
+
+    // Posts per account limit (default: 10, can be changed in settings)
+    this.maxPostsPerAccount = store.get('maxPostsPerAccount', 10);
   }
 
   /**
@@ -1405,6 +1408,7 @@ class AutomationManager extends EventEmitter {
         getNextPost,
         returnPostToQueue,
         stopAccount: (id, name, reason) => stopAccount(id, name, reason), // Function wrapper to resolve at call time
+        activateReserveOnLimit: (completedAccountName) => activateReserveOnLimit(completedAccountName), // Aktywuj rezerwę po limicie
         stoppedAccounts,
         getGlobalStopFlag: () => globalStopFlag,
         getQueueLength
@@ -1415,6 +1419,13 @@ class AutomationManager extends EventEmitter {
     }
 
     this.addLog(`\n✅ Utworzono kolejkę z ${posts.length} postami, uruchamiam ${accountTasks.length} instancji...`, 'success');
+
+    // Log o limicie postów na konto
+    if (this.maxPostsPerAccount > 0) {
+      this.addLog(`📊 Limit postów na konto: ${this.maxPostsPerAccount} (po osiągnięciu limitu wchodzi konto z rezerwy)`, 'info');
+    } else {
+      this.addLog(`⚠️ Limit postów wyłączony (maxPostsPerAccount = 0) - konta nie będą się uruchamiać!`, 'warning');
+    }
 
     // =============================================
     // SYSTEM REZERWY: Podział na aktywne i rezerwowe konta
@@ -1487,17 +1498,15 @@ class AutomationManager extends EventEmitter {
       if (activatedAccount) {
         this.addLog(`✅ Aktywowano konto z rezerwy: ${activatedAccount}`, 'success');
       }
+    };
 
-      // NOWA ZASADA STOPU: 70% kont zatrzymane + brak rezerwy
-      const totalAccounts = validAccounts.length;
-      const stoppedPercentage = (stoppedAccounts.size / totalAccounts) * 100;
-      const hasReserve = reserveTasks.length > 0;
-
-      if (stoppedPercentage >= 70 && !hasReserve) {
-        globalStopFlag = true;
-        this.isRunning = false;
-        this.addLog(`\n🛑 STOP AUTOMATYZACJI - ${stoppedPercentage.toFixed(0)}% kont zatrzymane i brak rezerwy`, 'error');
-        this.addLog(`   Zatrzymane konta: ${stoppedAccounts.size}/${totalAccounts}`, 'error');
+    // Funkcja aktywująca konto z rezerwy po osiągnięciu limitu postów
+    const activateReserveOnLimit = (completedAccountName) => {
+      const activatedAccount = activateReserveAccount();
+      if (activatedAccount) {
+        this.addLog(`🔄 Aktywowano konto z rezerwy: ${activatedAccount} (limit wyczerpany przez: ${completedAccountName})`, 'success');
+      } else {
+        this.addLog(`⚠️ Brak kont rezerwowych - ${completedAccountName} zakończył pracę`, 'warning');
       }
     };
 
@@ -1625,6 +1634,12 @@ class AutomationManager extends EventEmitter {
       this.addLog(`   • Kont z sukcesem: ${successCount}`, 'success');
       this.addLog(`   • Kont z błędami: ${failedAccounts}`, failedAccounts > 0 ? 'warning' : 'info');
       this.addLog(`   • Kont zatrzymanych: ${stoppedAccounts.size}`, stoppedAccounts.size > 0 ? 'error' : 'info');
+
+      // Statystyki limitów postów na konto
+      if (this.maxPostsPerAccount > 0) {
+        const accountsReachedLimit = accountsStats.filter(s => s.successfulPosts.length >= this.maxPostsPerAccount && !s.criticalError).length;
+        this.addLog(`   • Kont osiągniętych limit (${this.maxPostsPerAccount} postów): ${accountsReachedLimit}`, accountsReachedLimit > 0 ? 'info' : 'info');
+      }
 
       // Statystyki postów
       this.addLog(`\n📝 POSTY:`, 'info');
@@ -1978,6 +1993,22 @@ class AutomationManager extends EventEmitter {
         // Sprawdź globalny flag stopu
         if (task.getGlobalStopFlag()) {
           this.addLog(`${logPrefix} 🛑 Globalny stop - przerywam postowanie`, 'error');
+          break;
+        }
+
+        // SPRAWDŹ LIMIT POSTÓW NA KONTO
+        if (this.maxPostsPerAccount > 0 && accountStats.successfulPosts.length >= this.maxPostsPerAccount) {
+          const remainingInQueue = task.getQueueLength();
+          this.addLog(`${logPrefix} ✅ Limit postów osiągnięty (${accountStats.successfulPosts.length}/${this.maxPostsPerAccount}) - kończę pracę`, 'success');
+
+          // Jeśli są jeszcze posty w kolejce, aktywuj konto rezerwowe
+          if (remainingInQueue > 0) {
+            this.addLog(`${logPrefix} 📋 Pozostało ${remainingInQueue} postów w kolejce`, 'info');
+            // Aktywuj konto rezerwowe przez callback
+            if (task.activateReserveOnLimit) {
+              task.activateReserveOnLimit(accountName);
+            }
+          }
           break;
         }
 

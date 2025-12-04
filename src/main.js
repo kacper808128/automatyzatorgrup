@@ -151,6 +151,15 @@ ipcMain.handle('get-all-accounts', async () => {
   return store.get('facebookAccounts', []);
 });
 
+ipcMain.handle('save-setting', async (event, key, value) => {
+  store.set(key, value);
+  return { success: true };
+});
+
+ipcMain.handle('get-setting', async (event, key) => {
+  return store.get(key);
+});
+
 ipcMain.handle('stop-posting', async () => {
   try {
     await automationManager.stopPosting();
