@@ -298,6 +298,12 @@ class AutomationManager extends EventEmitter {
 
     for (const account of accounts) {
       if (!account.cookies) {
+        // Konto bez cookies też dodajemy - pozwolimy na ręczne logowanie
+        this.addLog(`⚠️ ${account.name || account.email || `Konto #${account.id}`}: Brak cookies (będzie wymagało ręcznego logowania)`, 'warning');
+        validAccounts.push({
+          ...account,
+          cookieValidation: { valid: false, reason: 'Brak cookies', requiresManualLogin: true }
+        });
         invalidAccounts.push({
           ...account,
           validationError: 'Brak cookies'
@@ -313,6 +319,8 @@ class AutomationManager extends EventEmitter {
         validation = this.validateCookies(account.cookies);
       }
 
+      // ZAWSZE dodaj konto do validAccounts, nawet jeśli cookies są nieważne
+      // Proces ręcznego logowania je naprawi
       if (validation.valid) {
         if (validation.warning) {
           this.addLog(`⚠️ ${account.name || account.email}: ${validation.reason}`, 'warning');
@@ -322,7 +330,12 @@ class AutomationManager extends EventEmitter {
           cookieValidation: validation
         });
       } else {
-        this.addLog(`❌ ${account.name || account.email}: ${validation.reason}`, 'error');
+        // Konto z nieważnymi cookies też dodajemy, ale z flagą że wymaga ręcznego logowania
+        this.addLog(`⚠️ ${account.name || account.email}: ${validation.reason} (będzie wymagało ręcznego logowania)`, 'warning');
+        validAccounts.push({
+          ...account,
+          cookieValidation: { ...validation, requiresManualLogin: true }
+        });
         invalidAccounts.push({
           ...account,
           validationError: validation.reason
@@ -1347,18 +1360,26 @@ class AutomationManager extends EventEmitter {
     );
 
     // Podsumowanie walidacji
-    if (invalidAccounts.length > 0) {
-      this.addLog(`\n⚠️ Konta z nieważnymi cookies (pominięte):`, 'warning');
+    const accountsWithValidCookies = validAccounts.filter(a => !a.cookieValidation?.requiresManualLogin).length;
+    const accountsRequiringLogin = invalidAccounts.length;
+
+    if (accountsRequiringLogin > 0) {
+      this.addLog(`\n⚠️ Konta z nieważnymi cookies (będą wymagały ręcznego logowania):`, 'warning');
       for (const acc of invalidAccounts) {
-        this.addLog(`   ❌ ${acc.name || acc.email || `Konto #${acc.id}`}: ${acc.validationError}`, 'error');
+        this.addLog(`   ⚠️ ${acc.name || acc.email || `Konto #${acc.id}`}: ${acc.validationError}`, 'warning');
       }
+      this.addLog(`   💡 Te konta uruchomią się, poczekają na ręczne logowanie i automatycznie zaktualizują cookies`, 'info');
     }
 
     if (validAccounts.length === 0) {
-      throw new Error('Brak kont z ważnymi cookies! Odśwież cookies i spróbuj ponownie.');
+      throw new Error('Brak kont do uruchomienia! Dodaj konta z cookies.');
     }
 
-    this.addLog(`\n✅ Konta z ważnymi cookies: ${validAccounts.length}/${accounts.length}`, 'success');
+    this.addLog(`\n✅ Konta gotowe do pracy: ${validAccounts.length}/${accounts.length}`, 'success');
+    this.addLog(`   • Z ważnymi cookies: ${accountsWithValidCookies}`, 'success');
+    if (accountsRequiringLogin > 0) {
+      this.addLog(`   • Wymagające logowania: ${accountsRequiringLogin}`, 'warning');
+    }
 
     // =============================================
     // KOLEJKA: Współdzielona kolejka postów
@@ -1777,24 +1798,33 @@ class AutomationManager extends EventEmitter {
 
       page = await context.newPage();
 
-      // Załaduj cookies
-      const parsedCookies = JSON.parse(cookies);
-      const normalizedCookies = parsedCookies.map(cookie => ({
-        name: cookie.name,
-        value: cookie.value,
-        domain: cookie.domain,
-        path: cookie.path || '/',
-        secure: cookie.secure !== undefined ? cookie.secure : false,
-        httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : false,
-        sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
-                 cookie.sameSite === 'lax' ? 'Lax' :
-                 cookie.sameSite === 'strict' ? 'Strict' : 'None',
-        expires: cookie.expirationDate ? cookie.expirationDate : undefined
-      }));
+      // Załaduj cookies (jeśli są)
+      if (cookies && cookies !== '') {
+        try {
+          const parsedCookies = JSON.parse(cookies);
+          const normalizedCookies = parsedCookies.map(cookie => ({
+            name: cookie.name,
+            value: cookie.value,
+            domain: cookie.domain,
+            path: cookie.path || '/',
+            secure: cookie.secure !== undefined ? cookie.secure : false,
+            httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : false,
+            sameSite: cookie.sameSite === 'no_restriction' ? 'None' :
+                     cookie.sameSite === 'lax' ? 'Lax' :
+                     cookie.sameSite === 'strict' ? 'Strict' : 'None',
+            expires: cookie.expirationDate ? cookie.expirationDate : undefined
+          }));
 
-      // Playwright: addCookies na context
-      await context.addCookies(normalizedCookies);
-      this.addLog(`${logPrefix} ✅ Cookies załadowane`, 'success');
+          // Playwright: addCookies na context
+          await context.addCookies(normalizedCookies);
+          this.addLog(`${logPrefix} ✅ Cookies załadowane (${normalizedCookies.length})`, 'success');
+        } catch (cookieError) {
+          this.addLog(`${logPrefix} ⚠️ Nie udało się załadować cookies: ${cookieError.message}`, 'warning');
+          this.addLog(`${logPrefix} Kontynuuję - będzie wymagane ręczne logowanie`, 'info');
+        }
+      } else {
+        this.addLog(`${logPrefix} ⚠️ Brak cookies - będzie wymagane ręczne logowanie`, 'warning');
+      }
 
       // Przejdź na Facebook z lepszym timeout handling
       this.addLog(`${logPrefix} Otwieram Facebook...`, 'info');
