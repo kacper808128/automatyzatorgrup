@@ -141,6 +141,12 @@ async function startServer() {
     websocketService.initialize(io);
     logger.info('✓ WebSocket initialized');
 
+    // Initialize queue workers
+    logger.info('Initializing queue workers...');
+    const { initializeWorker } = require('./workers/posting.worker');
+    await initializeWorker();
+    logger.info('✓ Queue workers initialized');
+
     // Start server
     const PORT = process.env.PORT || 3000;
     const HOST = process.env.HOST || '0.0.0.0';
