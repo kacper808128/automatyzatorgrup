@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Storage (sensitive data)
+storage/cookies/*
+storage/screenshots/*
+storage/videos/*
+storage/logs/*
+
+# Keep directory structure
+!storage/cookies/.gitkeep
+!storage/screenshots/.gitkeep
+!storage/videos/.gitkeep
+!storage/logs/.gitkeep
+
+# Playwright
+playwright/.cache/
+test-results/
+playwright-report/
+
+# Build outputs
+dist/
+build/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# PM2
+.pm2/
+ecosystem.config.js.backup
+
+# Docker
+docker-compose.override.yml
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/

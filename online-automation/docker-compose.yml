@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # Redis - Queue & Cache
+  redis:
+    image: redis:7-alpine
+    container_name: fb-automation-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # MongoDB - Database
+  mongodb:
+    image: mongo:6
+    container_name: fb-automation-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:-changeme}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # Application Server
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fb-automation-app
+    ports:
+      - "3000:3000"
+      - "5900-5999:5900-5999"  # VNC ports
+      - "6080-6099:6080-6099"  # noVNC WebSocket ports
+    volumes:
+      - ./storage:/app/storage
+      - ./server:/app/server
+      - /dev/shm:/dev/shm  # Shared memory dla Chromium
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - MONGODB_URI=mongodb://admin:${MONGO_PASSWORD:-changeme}@mongodb:27017/fb-automation?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LOG_ENDPOINT_URL=${LOG_ENDPOINT_URL}
+      - MAX_CONCURRENT_ACCOUNTS=${MAX_CONCURRENT_ACCOUNTS:-5}
+      - MAX_POSTS_PER_ACCOUNT=${MAX_POSTS_PER_ACCOUNT:-10}
+      - HEADLESS_MODE=${HEADLESS_MODE:-true}
+      - VNC_ENABLED=${VNC_ENABLED:-true}
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    shm_size: 2gb  # Increase shared memory dla Chromium
+    security_opt:
+      - seccomp:unconfined  # Required dla niektórych Chromium features
+
+volumes:
+  redis-data:
+    driver: local
+  mongo-data:
+    driver: local

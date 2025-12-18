@@ -1,0 +1,29 @@
+{
+  "name": "fb-automation-online",
+  "version": "1.0.0",
+  "description": "Facebook Group Automation - Online Version with Dashboard & VNC",
+  "main": "server/server.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server:dev\" \"npm run dashboard:dev\"",
+    "server:dev": "cd server && npm run dev",
+    "dashboard:dev": "cd dashboard && npm run dev",
+    "server": "cd server && npm start",
+    "dashboard:build": "cd dashboard && npm run build",
+    "install:all": "npm install && cd server && npm install && cd ../dashboard && npm install",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f"
+  },
+  "keywords": [
+    "facebook",
+    "automation",
+    "playwright",
+    "vnc",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
