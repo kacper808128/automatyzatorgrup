@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const { verifyApiToken } = require('../middleware/auth.middleware');
 const logger = require('../utils/logger');
-// const vncService = require('../services/vnc.service'); // TODO: Implement
+const vncService = require('../services/vnc.service');
 
 /**
  * POST /api/vnc/:accountId/enable
@@ -21,19 +21,21 @@ router.post('/:accountId/enable', verifyApiToken, async (req, res) => {
   try {
     const { accountId } = req.params;
 
-    // TODO: Implement VNC service
     logger.info('[VNC] Enable requested for account', { accountId });
 
-    // Placeholder response
+    const session = await vncService.startSession(accountId);
+
     res.json({
       success: true,
-      message: 'VNC feature coming soon',
+      message: 'VNC enabled successfully',
       accountId,
       session: {
-        display: 99,
-        vncUrl: 'vnc://localhost:5999',
-        webUrl: '/vnc?display=99',
-        wsPort: 6179
+        display: session.display,
+        vncPort: session.vncPort,
+        noVNCWebPort: session.noVNCWebPort,
+        vncUrl: `vnc://localhost:${session.vncPort}`,
+        webUrl: `http://localhost:${session.noVNCWebPort}/vnc.html`,
+        startedAt: session.startedAt
       }
     });
 
@@ -52,6 +54,8 @@ router.post('/:accountId/disable', verifyApiToken, async (req, res) => {
     const { accountId } = req.params;
 
     logger.info('[VNC] Disable requested for account', { accountId });
+
+    await vncService.stopSession(accountId);
 
     res.json({
       success: true,
@@ -73,11 +77,19 @@ router.get('/:accountId/status', async (req, res) => {
   try {
     const { accountId } = req.params;
 
-    // TODO: Get actual VNC status
+    const session = vncService.getSession(accountId);
+
     res.json({
       accountId,
-      active: false,
-      session: null
+      active: !!session,
+      session: session ? {
+        display: session.display,
+        vncPort: session.vncPort,
+        noVNCWebPort: session.noVNCWebPort,
+        vncUrl: `vnc://localhost:${session.vncPort}`,
+        webUrl: `http://localhost:${session.noVNCWebPort}/vnc.html`,
+        startedAt: session.startedAt
+      } : null
     });
 
   } catch (error) {
@@ -87,23 +99,21 @@ router.get('/:accountId/status', async (req, res) => {
 });
 
 /**
- * POST /api/vnc/:accountId/screenshot
- * Take screenshot of browser
+ * GET /api/vnc/sessions
+ * Get all active VNC sessions
  */
-router.post('/:accountId/screenshot', verifyApiToken, async (req, res) => {
+router.get('/sessions', async (req, res) => {
   try {
-    const { accountId } = req.params;
-
-    logger.info('[VNC] Screenshot requested for account', { accountId });
+    const sessions = vncService.getAllSessions();
 
     res.json({
       success: true,
-      message: 'Screenshot feature coming soon',
-      accountId
+      count: sessions.length,
+      sessions
     });
 
   } catch (error) {
-    logger.error('[VNC] Error taking screenshot', { error: error.message });
+    logger.error('[VNC] Error getting VNC sessions', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
