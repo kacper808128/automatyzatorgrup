@@ -15,7 +15,6 @@
     "redis": "^4.6.5",
     "mongoose": "^8.0.3",
     "playwright": "^1.40.1",
-    "@rebrowser/rebrowser-patches": "^5.9.6",
     "dotenv": "^16.3.1",
     "bcrypt": "^5.1.1",
     "jsonwebtoken": "^9.0.2",
